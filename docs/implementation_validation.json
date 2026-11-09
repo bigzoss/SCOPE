@@ -1,0 +1,245 @@
+{
+  "versions": {
+    "torch": "2.8.0",
+    "transformers": "4.57.1",
+    "peft": "0.17.1",
+    "numpy": "1.26.4",
+    "requests": "2.34.2",
+    "safetensors": "0.8.0"
+  },
+  "native": {
+    "passed": true,
+    "task_id": "5456",
+    "real_environment": true,
+    "native_private_state_hash_equal": true,
+    "public_continuation_equal": true,
+    "manifest_unchanged": true,
+    "restore_level": "native_private_state"
+  },
+  "hf": {
+    "passed": true,
+    "real_model": "/home/hyx/lm_workspace/longagent/outputs/merged/shopsim_sft_6k_8kctx_epoch3",
+    "physical_gpu": 2,
+    "task_id": "5456",
+    "task_split": "rl_train",
+    "engineering_only": true,
+    "runtime_overrides": {
+      "max_turns": 2,
+      "actor_max_new": 64,
+      "manager_max_new": 32,
+      "local_candidates": 2
+    },
+    "sft_gradient": {
+      "loss": 2.0370724201202393,
+      "grad_norm": 6.31162691116333
+    },
+    "manager_parameters_changed_after_sft": true,
+    "actor_parameters_unchanged": true,
+    "next_update_resume_exact": true,
+    "native_restore_verified": true,
+    "local_credit": {
+      "returns": [
+        -0.0256666,
+        -0.0256666
+      ],
+      "advantages": [
+        0.0,
+        0.0
+      ],
+      "phase": "context",
+      "zero_variance": true
+    },
+    "local_grpo_update": {
+      "loss": 6.46111533342264e-06,
+      "kl": 0.0006461115553975105,
+      "grad_norm": 0.0012853523949161172,
+      "trained_actions": 2,
+      "optimizer_step": true
+    },
+    "manager_parameters_changed_after_local_grpo": true,
+    "local_reward_source": "real terminal metrics plus actual invalid/token costs; zero task success is not evidence of benefit",
+    "metrics": {
+      "success": 0.0,
+      "r_strict": 0.0,
+      "r_loose": 0.0,
+      "purchased": 0.0
+    },
+    "global_queries": 1,
+    "local_query_continuations": 2,
+    "cuda_peak_allocated_bytes": 26624394752
+  },
+  "resume": {
+    "bitwise_equal": true,
+    "max_abs_diff": 0.0,
+    "roundtrip_parameters_equal": true,
+    "optimizer_moment_max_abs_diff": 0.0,
+    "clipped_gradient_max_abs_diff": 0.0,
+    "step_device_before": "cpu",
+    "step_device_after": "cpu"
+  },
+  "cli": {
+    "passed": true,
+    "engineering_only": true,
+    "train_updates": 2,
+    "new_process_resume": true,
+    "evaluation_tasks": 2,
+    "split": "rl_train",
+    "partial_generation_budgets": true,
+    "frozen_evaluation": true,
+    "not_a_benchmark_success_estimate": true
+  },
+  "warmup_cli": {
+    "passed": true,
+    "real_public_prefix_examples": 120,
+    "engineering_sft_examples": 4,
+    "new_process_resume": true,
+    "updates": 4,
+    "actor_unchanged": true,
+    "task_performance_not_evaluated": true
+  },
+  "cleanup": [
+    {
+      "own_processes_ended": true,
+      "service_pid": 3167886,
+      "port": 5112,
+      "original_5084_untouched": true
+    },
+    {
+      "own_processes_ended": true,
+      "service_pid": 3477790,
+      "port": 5112,
+      "original_5084_untouched": true
+    },
+    {
+      "own_processes_ended": true,
+      "service_pid": 3658662,
+      "port": 5112,
+      "original_5084_untouched": true
+    },
+    {
+      "own_processes_ended": true,
+      "service_pid": 3687318,
+      "port": 5112,
+      "original_5084_untouched": true
+    }
+  ],
+  "original_5084_http_status": 200,
+  "original_5084_ready": true,
+  "source_sha256": {
+    "scope/__init__.py": "f87e259490abd8b47f95298ab34c3409efd4c9f30fa6e90414c060e53e2f5e34",
+    "scope/alfworld.py": "e528bec98fa5198fe2a62eab5403c79062f4147250f3d00b1bc5a3479a5e4fc8",
+    "scope/atlas.py": "189a27c8bd7dbb534ff94e5f156286dba14be731b5db9ca73097474fe113471e",
+    "scope/checkpoint.py": "d4750171d06f0ab7dfeabd9352326a9587a20795db47a5bc28342b9f7dcbd911",
+    "scope/cli.py": "efe0fc3c5d7a2f341bf4c3b11b776e57a251edc2ad5f3d82c3d39f31139c8085",
+    "scope/contracts.py": "390a154969f0dca2f0598a13e3c3644452de8a244c07834fc133fad44e91185f",
+    "scope/credit.py": "1d764048f7f518fd9806cd235252117f564c66ddcce7d29ea0ffe4b78885bc59",
+    "scope/data.py": "dafa2f25ae3dd707338f96d7d5bf57145894eaa3a32db44fe82ecc71b7af7984",
+    "scope/environments.py": "e136221629c4b247a5512c30aba234f255c4a2c3f5d58202738d238c14cdd61c",
+    "scope/evaluation.py": "4e77b5d696f1861557941069e460903fae293b9e6e6e51ed20e264e885e409f2",
+    "scope/experience.py": "f01cd6db227dc73df10fed46dc6b615db2a8cd43dcfcb6bfe982c5408fa18f1d",
+    "scope/io.py": "0ab8746411ff9c607cebcac5233e5ee4b832ff772c02d477a499db70869fde92",
+    "scope/launcher.py": "818488b9c3b30405256acdd34753a478145a46d34292921948fb2e745641f34d",
+    "scope/policy.py": "fd7f8cee57229407a632f664172a9072b0fa90ed34387f9b9b34dfa27d7ef419",
+    "scope/retrieval.py": "6bd592450b8066ac01981bbe3b703b6f0539f10081677b4c200f47ed896378a4",
+    "scope/rollout.py": "6d87700037e9de4860aa58092298ecda683346968d9a6626ae1a474fc6bc9a16",
+    "scope/service.py": "6ace9afc052bf7ac6abe7bd07660334e09e7367d249f27719492c0ad25be0b18",
+    "scope/tools.py": "b4299ea9ecfb1ee6ed17b7f0ed10dfb81d7c4284268b191e87ed6363677732d0",
+    "scope/training.py": "035c2095198523c93708a25fe4362302eb473f0f46b0bf94e55cc2db297dc270",
+    "scope/validation.py": "137bbbfd9a19fe8c815030dd1246d09c85ea195fef068ea6ca54542f93145fbb",
+    "scope/warmup.py": "9b64581876605c92526fd420341197f5ed5a6dd0359f7ac5622ee4ae99e58edf",
+    "pyproject.toml": "3c309b716f0d1fac42a93a57c9fb746ba80161aadaf82130f57bddb4d3fd0e3f"
+  },
+  "engineering_only": true,
+  "latest_full_budget_execution_matches_current_source": true,
+  "unchanged_gradient_and_checkpoint_modules": {
+    "scope/policy.py": true,
+    "scope/checkpoint.py": true,
+    "scope/training.py": true,
+    "scope/credit.py": true
+  },
+  "state_modules_refined_after_warmup": [
+    "scope/atlas.py",
+    "scope/validation.py",
+    "pyproject.toml"
+  ],
+  "full_budget": {
+    "complete": true,
+    "n": 1,
+    "expected": 1,
+    "split": "rl_train",
+    "subset": true,
+    "success_count": 0,
+    "strict_success_rate": 0.0,
+    "mean_loose_reward": 0.8,
+    "mean_strict_reward": 0.0,
+    "wrong_purchase_rate": 1.0,
+    "illegal_action_rate_per_turn": 0.0,
+    "length_termination_rate_per_turn": 0.0,
+    "mean_total_tokens": 36357.0,
+    "parameters_unchanged_during_eval": true,
+    "memory_unchanged": true,
+    "results_sha256": "fa27c5e371b9c3e24a266b8187efbc760993aba2e4dd829e43f55ecaf365d522",
+    "task_ids_sha256": "f21af0b8828d07e3cf4c310c0897275e64ca0641fb8bf11d17709d64f77d5510"
+  },
+  "full_budget_cleanup": {
+    "own_processes_ended": true,
+    "service_pid": 54981,
+    "port": 5112,
+    "original_5084_untouched": true
+  },
+  "unit_tests": {
+    "tests": 13,
+    "failures": 0,
+    "errors": 0,
+    "junit_sha256": "3377191219dc7d03ea6ffe858405e947bcf8f7368525a62b2393da38b463636a"
+  },
+  "rechecked_public_prefix_examples": 120,
+  "original_dataset_files_unchanged": true,
+  "gpu2": "2, 1 MiB",
+  "remaining_scope_processes": [],
+  "retained_run_artifacts_size": "2.4G",
+  "retained_run_artifacts_purpose": "adapter/optimizer checkpoints, restart evidence, public trajectories and resolved numerical diagnostic records; shared base model is not copied",
+  "delivered_files_sha256": {
+    ".gitignore": "55dd0f4ae3b24a6b11764a45f3112943df47652aad1b5a506db005500505f49c",
+    "README.md": "a79a068dcfcc0bd7a42f8488e24589d5aeb41e42b9809037d3a2b0ee67f41019",
+    "configs/alfworld_http.json": "1e3e292b1140f8a0cfb0ef9da36bb644c6002f293bcbfac45b8fbbd2e2eb991c",
+    "configs/shopsim.json": "7be0f979f664a388a778f9d25c57c82864c12f502e7602c9e72b46aa2b12f139",
+    "docs/design.md": "324be48424cc410138bc5fb6e3450159e4bca4edff78650931a90fb64408bb92",
+    "docs/implementation_validation.md": "fa18ee712d8d0bd27d120f93fb34f8da52a0ff291a6bf12cf10afba92e36f6f0",
+    "pyproject.toml": "3c309b716f0d1fac42a93a57c9fb746ba80161aadaf82130f57bddb4d3fd0e3f",
+    "requirements-tested.txt": "2bd51f39aaac4eab4dbf82421cc91d387831b6a745cce0e7b33fd3fbdfe9c7f0",
+    "scope/__init__.py": "f87e259490abd8b47f95298ab34c3409efd4c9f30fa6e90414c060e53e2f5e34",
+    "scope/alfworld.py": "e528bec98fa5198fe2a62eab5403c79062f4147250f3d00b1bc5a3479a5e4fc8",
+    "scope/atlas.py": "189a27c8bd7dbb534ff94e5f156286dba14be731b5db9ca73097474fe113471e",
+    "scope/checkpoint.py": "d4750171d06f0ab7dfeabd9352326a9587a20795db47a5bc28342b9f7dcbd911",
+    "scope/cli.py": "efe0fc3c5d7a2f341bf4c3b11b776e57a251edc2ad5f3d82c3d39f31139c8085",
+    "scope/contracts.py": "390a154969f0dca2f0598a13e3c3644452de8a244c07834fc133fad44e91185f",
+    "scope/credit.py": "1d764048f7f518fd9806cd235252117f564c66ddcce7d29ea0ffe4b78885bc59",
+    "scope/data.py": "dafa2f25ae3dd707338f96d7d5bf57145894eaa3a32db44fe82ecc71b7af7984",
+    "scope/environments.py": "e136221629c4b247a5512c30aba234f255c4a2c3f5d58202738d238c14cdd61c",
+    "scope/evaluation.py": "4e77b5d696f1861557941069e460903fae293b9e6e6e51ed20e264e885e409f2",
+    "scope/experience.py": "f01cd6db227dc73df10fed46dc6b615db2a8cd43dcfcb6bfe982c5408fa18f1d",
+    "scope/io.py": "0ab8746411ff9c607cebcac5233e5ee4b832ff772c02d477a499db70869fde92",
+    "scope/launcher.py": "818488b9c3b30405256acdd34753a478145a46d34292921948fb2e745641f34d",
+    "scope/policy.py": "fd7f8cee57229407a632f664172a9072b0fa90ed34387f9b9b34dfa27d7ef419",
+    "scope/retrieval.py": "6bd592450b8066ac01981bbe3b703b6f0539f10081677b4c200f47ed896378a4",
+    "scope/rollout.py": "6d87700037e9de4860aa58092298ecda683346968d9a6626ae1a474fc6bc9a16",
+    "scope/service.py": "6ace9afc052bf7ac6abe7bd07660334e09e7367d249f27719492c0ad25be0b18",
+    "scope/tools.py": "b4299ea9ecfb1ee6ed17b7f0ed10dfb81d7c4284268b191e87ed6363677732d0",
+    "scope/training.py": "035c2095198523c93708a25fe4362302eb473f0f46b0bf94e55cc2db297dc270",
+    "scope/validation.py": "137bbbfd9a19fe8c815030dd1246d09c85ea195fef068ea6ca54542f93145fbb",
+    "scope/warmup.py": "9b64581876605c92526fd420341197f5ed5a6dd0359f7ac5622ee4ae99e58edf",
+    "scripts/make_alfworld_config.py": "253ca6cdd4c008d94c6ba327e8ff5bf1f3a04e1cf186c8e6cdaf48a49d988e70",
+    "scripts/make_configs.py": "513690e8a68139a05a7baf2254ba1233bc7879a21f005dec4c350f0ad2546da5",
+    "scripts/validate_cli.py": "e8e676c079861eccbfe2b2af3d2fe0ca3dfafe59dc429bb2a34a590c3938d0b5",
+    "scripts/validate_hf.py": "d6a4fe0653c00795011a6b5f485989e2569815d17ac68f1eb153549cdb13c33b",
+    "scripts/validate_native.py": "feb7217ad717cee06a0f01cf4cade44d850a210d5ba39410ae511eb522917159",
+    "scripts/validate_warmup_cli.py": "a8985624fa64884ec32e557d6963e828dfa7d667d67800a4179b5b04dc835085",
+    "tests/test_alfworld.py": "59dc57c9129a46dac86f083c642700c7e455996695db369b5f00eeb20ba2d56f",
+    "tests/test_credit.py": "0f63c1b88e285d42ff1b6ed9cecef6f2cbd6c35083b93d5b92117213ca8a5c81",
+    "tests/test_policy.py": "a43a26d5e91d03e938c605ede34ffe31466f20c17797cb3f20c4b2c0403ccd2e",
+    "tests/test_runtime.py": "79ef4bc8c826a33cef20badfa9c6cafd001742e4bf161fd4caef2a50eaf5328b",
+    "tests/test_state.py": "6586b0bddf29d2da38376e8c072730f1b55769bd296947f7a8ff535f235d9a7f"
+  },
+  "document_references_checked": true
+}

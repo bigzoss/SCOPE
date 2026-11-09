@@ -1,0 +1,9 @@
+# Observed in the reused .venv-verl runtime; do not upgrade the shared environment.
+# torch runtime reports 2.8.0+cu128; installed package metadata reports 2.8.0.
+torch==2.8.0
+transformers==4.57.1
+peft==0.17.1
+numpy==1.26.4
+requests==2.34.2
+safetensors==0.8.0
+# The CPU simulator uses the separate existing .venv-shopsim and Java installation.

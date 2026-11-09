@@ -1,0 +1,283 @@
+{
+  "date": "2026-11-08",
+  "project": "/home/hyx/lm_workspace/SCOPE",
+  "version": "0.2.0",
+  "core_modules": 24,
+  "status": "audit_complete_engineering_prototype_with_research_gaps",
+  "original_regressions_failed": 10,
+  "tests": {
+    "passed": 33,
+    "failed": 0,
+    "errors": 0,
+    "seconds": 3.963
+  },
+  "real_native": {
+    "passed": true,
+    "task_id": "5456",
+    "real_environment": true,
+    "native_private_state_hash_equal": true,
+    "public_continuation_equal": true,
+    "real_terminal_projection_verified": true,
+    "terminal_score_separate_from_public_observation": true,
+    "manifest_unchanged": true,
+    "restore_level": "native_private_state"
+  },
+  "real_hf": {
+    "passed": true,
+    "real_model": "/home/hyx/lm_workspace/longagent/outputs/merged/shopsim_sft_6k_8kctx_epoch3",
+    "physical_gpu": 2,
+    "task_id": "5456",
+    "task_split": "rl_train",
+    "engineering_only": true,
+    "runtime_overrides": {
+      "max_turns": 2,
+      "actor_max_new": 64,
+      "manager_max_new": 32,
+      "local_candidates": 2
+    },
+    "sft_gradient": {
+      "loss": 2.1653919219970703,
+      "grad_norm": 6.697971820831299
+    },
+    "manager_parameters_changed_after_sft": true,
+    "actor_parameters_unchanged": true,
+    "gradient_checkpointing_active_during_replay": true,
+    "next_update_resume_exact": true,
+    "native_restore_verified": true,
+    "local_credit": {
+      "returns": [
+        -0.0256204,
+        -0.0256204
+      ],
+      "advantages": [
+        0.0,
+        0.0
+      ],
+      "phase": "context",
+      "zero_variance": true,
+      "task_returns": [
+        0.0,
+        0.0
+      ],
+      "task_zero_variance": true,
+      "non_task_only_advantage": false
+    },
+    "local_grpo_update": {
+      "loss": 5.0316471060796175e-06,
+      "kl": 0.00050316471606493,
+      "grad_norm": 0.0016649930039420724,
+      "trained_actions": 2,
+      "optimizer_step": true
+    },
+    "manager_parameters_changed_after_local_grpo": true,
+    "local_reward_source": "real terminal metrics plus actual invalid/token costs; zero task success is not evidence of benefit",
+    "metrics": {
+      "success": 0.0,
+      "r_strict": 0.0,
+      "r_loose": 0.0,
+      "purchased": 0.0
+    },
+    "global_queries": 1,
+    "local_query_continuations": 2,
+    "cuda_peak_allocated_bytes": 17741479424
+  },
+  "real_hf_resume": {
+    "bitwise_equal": true,
+    "max_abs_diff": 0.0,
+    "roundtrip_parameters_equal": true,
+    "optimizer_moment_max_abs_diff": 0.0,
+    "clipped_gradient_max_abs_diff": 0.0,
+    "step_device_before": "cpu",
+    "step_device_after": "cpu"
+  },
+  "real_cli": {
+    "passed": true,
+    "engineering_only": true,
+    "train_updates": 2,
+    "new_process_resume": true,
+    "evaluation_tasks": 2,
+    "split": "rl_train",
+    "partial_generation_budgets": true,
+    "frozen_evaluation": true,
+    "not_a_benchmark_success_estimate": true
+  },
+  "real_cli_train": {
+    "complete": true,
+    "completed_updates": 2,
+    "method": "conditional",
+    "global_queries": 4,
+    "probe_queries": 4,
+    "updates_with_parameter_change": 2,
+    "frozen_role_unchanged": true
+  },
+  "real_cli_eval": {
+    "complete": true,
+    "n": 2,
+    "expected": 2,
+    "split": "rl_train",
+    "subset": true,
+    "success_count": 0,
+    "strict_success_rate": 0.0,
+    "mean_loose_reward": 0.0,
+    "mean_strict_reward": 0.0,
+    "wrong_purchase_rate": 0.0,
+    "illegal_action_rate_per_turn": 1.0,
+    "length_termination_rate_per_turn": 1.0,
+    "mean_total_tokens": 3918.0,
+    "parameters_unchanged_during_eval": true,
+    "memory_unchanged": true,
+    "frozen_base_parameters_unchanged": true,
+    "evaluation_contract": {
+      "split": "rl_train",
+      "sequences_sha256": "c87af6213bcb24731b3f61ecbe40b1edbe804a8774d38ae61a366e156023891a",
+      "information_protocol": "full_instruction",
+      "benchmark": "shopsim",
+      "generation_budget": {
+        "max_turns": 2,
+        "actor_max_input": 6144,
+        "actor_max_new": 32,
+        "manager_max_input": 2048,
+        "manager_max_new": 24,
+        "manager_episode_tokens": 1536,
+        "total_tokens": 100000,
+        "retrievals": 6
+      }
+    },
+    "results_sha256": "f6676de19bb7264640c88636b79bd3d098f76dec7284808686dbed92a22c60ab",
+    "task_ids_sha256": "1dba51eb3e67d50a5493c31db123b42752149056cbc3b274af80bd2ebcee6fd0"
+  },
+  "cleanup": {
+    "native": {
+      "own_processes_ended": true,
+      "service_pid": 2951135,
+      "port": 5112,
+      "original_5084_untouched": true
+    },
+    "native_terminal": {
+      "own_processes_ended": true,
+      "service_pid": 3238036,
+      "port": 5112,
+      "original_5084_untouched": true
+    },
+    "hf": {
+      "own_processes_ended": true,
+      "service_pid": 2986103,
+      "port": 5112,
+      "original_5084_untouched": true
+    },
+    "cli/train": {
+      "own_processes_ended": true,
+      "service_pid": 3077377,
+      "port": 5112,
+      "original_5084_untouched": true
+    },
+    "cli/eval": {
+      "own_processes_ended": true,
+      "service_pid": 3109600,
+      "port": 5112,
+      "original_5084_untouched": true
+    }
+  },
+  "remaining_own_processes": {},
+  "original_5084_http_status": 200,
+  "changed_against_saved_source": [
+    "README.md",
+    "configs/alfworld_http.json",
+    "configs/shopsim.json",
+    "scope/__init__.py",
+    "scope/alfworld.py",
+    "scope/atlas.py",
+    "scope/checkpoint.py",
+    "scope/cli.py",
+    "scope/config.py",
+    "scope/contracts.py",
+    "scope/credit.py",
+    "scope/data.py",
+    "scope/environments.py",
+    "scope/evaluation.py",
+    "scope/experience.py",
+    "scope/io.py",
+    "scope/launcher.py",
+    "scope/lifecycle.py",
+    "scope/policy.py",
+    "scope/public_data.py",
+    "scope/retrieval.py",
+    "scope/rollout.py",
+    "scope/service.py",
+    "scope/tools.py",
+    "scope/training.py",
+    "scope/validation.py",
+    "scope/warmup.py"
+  ],
+  "source_and_support_sha256": {
+    "README.md": "76a72af4afc19a07d559dcad4029e5ed422cd50c06bc68c66077736715c0de66",
+    "configs/alfworld_http.json": "a9ce0b8e141631b895695a1f300b01de08856699629b6b1852b6194b2c82e485",
+    "configs/shopsim.json": "df0551b68fd83a929d9a47063ecaa4b18518e5911adce5966c714f58f1988514",
+    "docs/implementation_validation.md": "d58265a51dbf554bff471f4ccbb4e0666b539656a2308efefd9cd3817af56bed",
+    "docs/module_audit.md": "1835ec20d4f516f1e35247abd62c8014d279b63917102a3fede7c89d1bcfe9c4",
+    "pyproject.toml": "bdd6bfdf86e85e1b3bc44de56778d9a46e1bf9a0b8f1ddb5b26eb72f21d84169",
+    "scope/__init__.py": "237ea02a9e14a5451e897dc827c485cba724f80fcf2d1375e25443b57fa6836c",
+    "scope/alfworld.py": "9404afd64fa152087201c4adca87835fd7df289a7e0984de871893ebb9387340",
+    "scope/atlas.py": "13987d3dc3558864bc89c904b6c80b55744478c91a5744f60aa4b96832845fd8",
+    "scope/checkpoint.py": "6bf55286d6b0e5c7476c60983c91f24c6ca3941a710749fbc3b9eddeb7ded569",
+    "scope/cli.py": "e9a40b2eb2927679e5ed2908808820ab1ff2f0f3c60838acb6598172de8b69b7",
+    "scope/config.py": "c2f2509bedfe3cd910d5955fd072a690ba743fc0fc985f4b7c6f8b04d1fb10bf",
+    "scope/contracts.py": "0e8cce905b016f0f3be9c0294a572eb4ab4eaa39175376c898880aa9c0267c63",
+    "scope/credit.py": "398e84072abacf4d0fe6229797a5e012e383fb98bee968a1c6ca8b3d5a0761a9",
+    "scope/data.py": "88c31912430e7141fbbfc7493150ea3e7ef398d724f892218f2e247c8ac68526",
+    "scope/environments.py": "2f5e39983bcab8a927eed0a3c6a995bcefa6ba1c127a8b6b0d132f3957b54dcf",
+    "scope/evaluation.py": "4d4eed488a83081a910a67e9f3e1afd5aecc8a896ab038881fb9ea0bffba597e",
+    "scope/experience.py": "f4850d74ce36e7b022d6765d2928743a9f7eb63b52b5e8e6bc03cbe59e812636",
+    "scope/io.py": "8431ae4fa70c3a9d833e67a38ebfca16f2e73f23b55c435a3ece3cd7557ffc45",
+    "scope/launcher.py": "9b1e5ab87aade0468fd9294e23ca1c8c14ad9289535fc44406a54d06ab3b1692",
+    "scope/lifecycle.py": "1da16cdf5b670df5f2f38838ae50b707ea393bae1cdf1e9b251a7a170a2fa44a",
+    "scope/policy.py": "d4bbeb399447a1a5eb3940be8535e170f7503968c157a982f39ed6d283574658",
+    "scope/public_data.py": "1f7d6fb8ea73089851c0945c8d6dfcc7029b72d63662a9d04a5c017f36317a63",
+    "scope/retrieval.py": "4c3266253bdcfaa4f8ae19022878bd14ff6dc6f3fb107d8fd3439c510a811489",
+    "scope/rollout.py": "f7421d5d7fa79cdcc087825f1f872616f9952609c0d5cc0318aab54ae595e23c",
+    "scope/service.py": "7a22f29e566413a3f7e51b6fbd2c368bf5a280678c27ec315c8c736331187332",
+    "scope/tools.py": "d526c6ece295016f6ae1a62c54c5188e0415c7953264d18492a6ca609957363b",
+    "scope/training.py": "285b18318c2173f4efb55d8279fac6e7b16da821ed6220835c2cf7a3758bb288",
+    "scope/validation.py": "82c884b4bcfe68db9be5a4f883434e796767f18c23d568058ef15cff20d3fb8c",
+    "scope/warmup.py": "7218d704397aac2cd275017c50c3b08297f6313941f1881bcd51911b81dda407",
+    "scripts/make_alfworld_config.py": "253ca6cdd4c008d94c6ba327e8ff5bf1f3a04e1cf186c8e6cdaf48a49d988e70",
+    "scripts/make_configs.py": "513690e8a68139a05a7baf2254ba1233bc7879a21f005dec4c350f0ad2546da5",
+    "scripts/validate_cli.py": "c7be752ff78de4396eb7ad6c0ea15826dac405c97bf9ade806ef6be497f92c5a",
+    "scripts/validate_hf.py": "5d176d82525964794e40d661ed31842e874d4200b50354a9ce900cbd91e551ca",
+    "scripts/validate_native.py": "30339efd432127d3086435b88c13588a688262b5af9685747febfbcb0e7eafc3",
+    "scripts/validate_warmup_cli.py": "a220a7ac5e26c20692cbfa2fe8bba497bf67566724dd7cbcc2586d8c4f53181b",
+    "tests/test_alfworld.py": "d73c9d0f9e578963a23a46c07526356dce956b29819f22e0981b2c0022ec8529",
+    "tests/test_credit.py": "0f63c1b88e285d42ff1b6ed9cecef6f2cbd6c35083b93d5b92117213ca8a5c81",
+    "tests/test_module_audit.py": "45df3997ef8cafdf224cf98df191d4c230bee8b7986999ee4cb955902eac4bbb",
+    "tests/test_policy.py": "93fb3fd04a633ca5ddd1de192bfcb46c41f0f38388230bb9ea492bef30dae59b",
+    "tests/test_runtime.py": "79ef4bc8c826a33cef20badfa9c6cafd001742e4bf161fd4caef2a50eaf5328b",
+    "tests/test_state.py": "6586b0bddf29d2da38376e8c072730f1b55769bd296947f7a8ff535f235d9a7f"
+  },
+  "evidence_sha256": {
+    "before.txt": "4d649f0fd862bae8c9d26d016e71b5765acb772c03f7cf2472c3b0f18d795cf1",
+    "final.txt": "51eee467f10ff133ab3357e8d1ccf21a398e52c3f89c7c97f9bbb58e2248f837",
+    "final.xml": "6b7e16db1cd9bbfe020e444ea237f7ea1ceed537df451287d508c75f1aa594da",
+    "preflight.json": "a73cf639e2987e06cfb08a433063b389b485f80c778ccc2a8e9f22fa65452380",
+    "preflight_alfworld.json": "28e687b8f2fd1d23bf928a7825377bf766068bf74bcb210fbfe37a6aab07878a",
+    "native/result.json": "1be413187005d33ccc8251fbbd557d3192cd2366bbcb559e4c1fb5cc0a35be41",
+    "native_terminal/result.json": "e81b70fbe21e743c098e680e50307440b1f429f7588c034949c3ee3a7392bb98",
+    "hf/result.json": "572d70c698a71b7e9566a0064cde6752323041fb398ad714416ed41797678fbb",
+    "hf/resume_validation.json": "12b81fec6794f35d3f03b0877f9cb931822f23d28eceb3578a6824b62b3d8db7",
+    "cli/result.json": "249c9fbb1c464580180e041d77eda2f3bde498da1b1be3173072bd2c8760b1f6",
+    "cli/train/train_summary.json": "462c1f5785a43d6c4ffb5d25db446cd065e4e7415edc4aeb3b44744eaf5b6dcc",
+    "cli/eval/summary.json": "91368899fcff05e8755516145429750e0d70ed5052aeb0e1fa131641690ac504",
+    "public_corpus_scan.json": "159e83236f39ea61799a599dbb16838350f62f0f7dbe7a569c34de880ff79d4a",
+    "changes.patch": "be1cededb69760f6823c53f35761bc3aa0f96ff5baf2bdcabc3ae7ed96d32cda"
+  },
+  "remaining_research_gaps": [
+    "Task-only memory and local credit; no genuine cross-query memory carry",
+    "Frozen audited experience bank; no automatic learning/promotion",
+    "Limited typed public-state predicates and extractive summaries",
+    "Cost-only variance can produce near-unit GRPO advantages in all-failed groups",
+    "One continuation per candidate; no automated state-context 2x2 interference study",
+    "No real ALFWorld transfer, formal 48-update campaign, dev300 comparison or final benchmark efficacy result"
+  ],
+  "scientific_effectiveness_verified": false,
+  "formal_training_started": false,
+  "validation_source_note": "Each actual run keeps its execution-time receipt. Final parser/terminal hardening is additionally covered by final tests and native_terminal; previous receipts were not rewritten."
+}

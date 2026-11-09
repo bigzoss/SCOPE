@@ -1,0 +1,13 @@
+__pycache__/
+.pytest_cache/
+*.egg-info/
+runs/
+*.sqlite*
+.venv/
+
+
+# Downloaded dependencies, datasets, and working files
+/benchmark/
+/baseline/
+/data/
+/ccfa-workfiles/

@@ -1,0 +1,26 @@
+{
+  "seed":233,
+  "split_seed":233,
+  "deterministic":true,
+  "gpu":2,
+  "data_root":"/home/hyx/lm_workspace/MA-GRPO/data/shopsimulator",
+  "model":{"path":"/home/hyx/lm_workspace/longagent/outputs/merged/shopsim_sft_6k_8kctx_epoch3","rank":16,"alpha":32},
+  "environment":{
+    "base_url":"http://127.0.0.1:5112",
+    "python":"/home/hyx/lm_workspace/longagent/.venv-shopsim/bin/python",
+    "longagent_root":"/home/hyx/lm_workspace/longagent",
+    "shop_root":"/home/hyx/lm_workspace/longagent/external/ShopSimulator-code",
+    "java_home":"/home/hyx/lm_workspace/longagent/.java",
+    "manifest":"/home/hyx/lm_workspace/MA-GRPO/data/shopsimulator/manifests/grpo_train_dev.json",
+    "train_products":"/home/hyx/lm_workspace/download/datasets/ShopSimulator/fine_items_train_standard.jsonl",
+    "eval_products":"/home/hyx/lm_workspace/download/datasets/ShopSimulator/fine_items_eval_standard.jsonl"
+  },
+  "runtime":{"max_turns":12,"actor_max_input":6144,"actor_max_new":256,"manager_max_input":2048,"manager_max_new":192,
+             "manager_episode_tokens":1536,"total_tokens":100000,"retrievals":6,"probe_query_horizon":1,
+             "invalid_weight":0.05,"cost_weight":0.02},
+  "training":{"method":"conditional","role":"manager","updates":48,"group_size":4,"local_group_size":4,"lr":0.00001,
+              "clip":0.2,"kl_beta":0.01,"local_weight":0.25,"alternating_window":8,"probe_turn":1,
+              "probe_updates":[4,8,12,16,20,24,28,32,36,40,44,48],
+              "curriculum":[{"through":16,"length":1},{"through":32,"length":2},{"through":48,"length":4}]},
+  "evaluation":{"sequence_length":2}
+}

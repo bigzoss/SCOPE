@@ -79,6 +79,35 @@ class HFPolicy:
     def count(self, text):
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
+    def choice_ids(self, labels):
+        tokens = [self.tokenizer.encode(label, add_special_tokens=False) for label in labels]
+        if any(len(ids) != 1 for ids in tokens) or len({tuple(ids) for ids in tokens}) != len(labels):
+            raise ContractError("Choice labels must map to distinct single tokens")
+        return [ids[0] for ids in tokens]
+
+    def sample_choice(self, messages, phase, boundary, labels, max_input, greedy=False):
+        torch = self.torch
+        prompt = self.encode(messages)
+        if not prompt or len(prompt) > max_input:
+            raise ContractError("Choice prompt exceeds input budget")
+        allowed = self.choice_ids(labels)
+        sample = Sample("manager", phase, prompt, [allowed[0]], [], "", self.versions["manager"],
+                        boundary, "choice", choice_token_ids=allowed)
+        with torch.no_grad():
+            probabilities = self.choice_logprobs(sample, "manager")
+            index = int(probabilities.argmax()) if greedy else int(torch.multinomial(probabilities.exp(), 1))
+        sample.text = labels[index]
+        sample.completion_ids = [allowed[index]]
+        sample.old_logprobs = [float(probabilities[index])]
+        return sample
+
+    def choice_logprobs(self, sample, role):
+        self.activate(role, training=self.torch.is_grad_enabled() and not role.endswith("_ref"))
+        ids = self.torch.tensor([sample.prompt_ids], device=self.device)
+        logits = self.model(input_ids=ids, attention_mask=self.torch.ones_like(ids), use_cache=False,
+                            logits_to_keep=1).logits[0, -1].float()
+        return logits[sample.choice_token_ids].log_softmax(-1)
+
     def sample(self, messages, role, phase, boundary, max_input, max_new, greedy=False):
         import torch
         if role not in self.versions:raise ContractError("Reference adapters are not rollout policies")
@@ -108,6 +137,12 @@ class HFPolicy:
     def logprobs(self, sample, role=None):
         import torch
         role = role or sample.role
+        if sample.choice_token_ids:
+            allowed = sample.choice_token_ids
+            if len(set(allowed)) != len(allowed) or len(sample.completion_ids) != 1 or sample.completion_ids[0] not in allowed:
+                raise ContractError("Invalid categorical manager action")
+            index = allowed.index(sample.completion_ids[0])
+            return self.choice_logprobs(sample, role)[index:index+1]
         self.activate(role,training=torch.is_grad_enabled() and not role.endswith("_ref"))
         prompt = sample.prompt_ids
         completion = sample.completion_ids
@@ -127,6 +162,8 @@ class HFPolicy:
         optimizer.zero_grad(set_to_none=True)
         losses, kls = [], []
         for sample, weight in usable:
+            if sample.origin != "policy":
+                raise ContractError("Teacher demonstrations cannot enter on-policy GRPO")
             if weight<0 or not math.isfinite(weight) or not math.isfinite(sample.advantage) or len(sample.old_logprobs)!=len(sample.completion_ids):
                 raise ContractError("Invalid loss weight or old-logprob mask")
             if sample.version != self.versions[role]:

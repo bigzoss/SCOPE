@@ -9,7 +9,7 @@ from .public_data import assert_public_text
 
 ACTION_MODES = ("legacy", "normalize", "grounded")
 LOOP_POLICIES = ("legacy", "state")
-TRACE_VERSION = "public-interaction-v1"
+TRACE_VERSION = "public-interaction-v2"
 WINDOW_SIZE = 8
 
 
@@ -48,11 +48,34 @@ class ActionAdapter:
         """Override to omit volatile UI fields from progress and loop detection."""
         return state
 
+    def public_facts(self, record):
+        """Yield domain facts with exact source spans from a public observation."""
+        return ()
+
+    def focus_entities(self, state):
+        return ()
+
+    def confirmation_target(self, command, entity):
+        """Return the state slot and expected value an accepted command attempts to change."""
+        return None
+
+    def recovery_slots(self, command):
+        """Return the public state slots needed to reconsider a rejected action."""
+        return ()
+
+    def decision_targets(self, state, goal):
+        """Unresolved public slots, including targets without an existing graph claim."""
+        return ()
+
+    def recovery_candidates(self, state, goal):
+        """Bound action suggestions supported by public observations; not an oracle policy."""
+        return ()
+
     def evidence_entity(self, command, previous):
         return previous
 
 
-def execute_action(env, adapter, response, observation, state, mode):
+def execute_action(env, adapter, response, observation, state, mode, blocked_commands=()):
     raw = action_text(response)
     binding = Binding()
     if adapter is None:
@@ -72,6 +95,9 @@ def execute_action(env, adapter, response, observation, state, mode):
             status = "binding_failed"
         elif binding.status == "invalid_syntax":
             status = "format_error"
+        if status == "accepted" and command in blocked_commands:
+            status = "no_progress_blocked"
+            binding = Binding("repeated_no_progress", "this command already made no progress twice in the same public state")
         sent = status == "accepted"
         if sent:
             next_observation, done, public = env.step_command(command)
@@ -89,9 +115,11 @@ def execute_action(env, adapter, response, observation, state, mode):
 
 def record_progress(window, before, after, command, evidence_id, accepted, done):
     """Detect a repeated transition after returning to a public state within a bounded window."""
-    if not accepted or command is None or done:
+    if command is None or done:
         window.clear()
         return ("terminal" if accepted and done else None), None
+    # Rejected commands are real decisions too. Keeping them in the window prevents
+    # a format/binding error from hiding a persistent same-state loop.
     edge = [before, command, after]
     repeat = next((i for i in range(len(window) - 1, -1, -1) if window[i]["edge"] == edge), None)
     cycle = None
@@ -100,10 +128,12 @@ def record_progress(window, before, after, command, evidence_id, accepted, done)
         if earlier[-1]["edge"][2] != before:
             raise ContractError("Discontinuous public interaction history")
         cycle = {"actions": [item["edge"][1] for item in earlier] + [command],
+                 "kind": "repeated_rejection" if not accepted else "public_state_cycle",
                  "evidence_ids": list(dict.fromkeys(item["evidence_id"] for item in earlier))}
     window.append({"edge": edge, "evidence_id": evidence_id})
     del window[:-WINDOW_SIZE]
-    return ("legal_no_progress" if before == after or cycle else "state_changed"), cycle
+    return ("invalid_no_progress" if not accepted else
+            "legal_no_progress" if before == after or cycle else "state_changed"), cycle
 
 
 def interaction_guidance(trace):

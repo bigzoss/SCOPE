@@ -10,6 +10,7 @@ from .io import atomic_json,atomic_jsonl,append_jsonl,canonical,digest,file_sha,
 from .rollout import EpisodeRunner
 from .config import DEFAULT_RUNTIME
 from .interaction import TRACE_VERSION
+from .recovery import recovery_diagnostics
 
 _BUDGET_FIELDS=("max_turns","actor_max_input","actor_max_new","manager_max_input","manager_max_new",
                 "manager_episode_tokens","total_tokens","retrievals")
@@ -19,7 +20,8 @@ def evaluation_contract(config,split,sequences):
     return {"split":split,"sequences_sha256":digest(sequences),"information_protocol":"full_instruction",
             "benchmark":config.get("environment",{}).get("kind","shopsim"),
             "public_interaction":{"trace_version":TRACE_VERSION, **{
-                k:config["runtime"].get(k,DEFAULT_RUNTIME[k]) for k in ("action_mode","loop_policy")}},
+                k:config["runtime"].get(k,DEFAULT_RUNTIME[k]) for k in ("action_mode","loop_policy","state_graph","memory_choice","compression_after","compression_min_chars","compact_actor_view","actor_history_turns")},
+                **{k:config["runtime"][k] for k in ("shared_memory","disabled_memory_tools","decision_evidence","decision_recovery") if config["runtime"].get(k)}},
             "generation_budget":{k:config["runtime"].get(k,DEFAULT_RUNTIME[k]) for k in _BUDGET_FIELDS}}
 
 
@@ -67,7 +69,7 @@ def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit
                 steps=[e for e in outcome.events if e["phase"]=="execute"]
                 unit.append({"task_id":task,"sequence_id":index,"metrics":outcome.metrics,"costs":outcome.costs,
                     "actor_turns":len(actor),"length_terminations":sum(s.termination=="length" for s in actor),
-                    "illegal_actions":sum(bool(e["is_error"]) for e in steps),
+                    "illegal_actions":sum(bool(e["is_error"]) and e["action_status"] != "no_progress_blocked" for e in steps),
                     "termination_reason":outcome.termination_reason,
                     "history":[e if e["phase"]=="execute" else {"phase":e["phase"],"command":None,
                                "is_error":None,"view_hash":None} for e in outcome.events],
@@ -103,11 +105,18 @@ def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit
              "public_interaction":{"format_errors":action_counts["format_error"],
                  "binding_failures":action_counts["binding_failed"],"environment_invalid":action_counts["environment_invalid"],
                  "legal_no_progress":progress_counts["legal_no_progress"],"public_state_loops":sum(bool(e["loop"]) for e in steps),
+                 "invalid_no_progress":progress_counts["invalid_no_progress"],
                  "episode_termination_reasons":dict(Counter(r["termination_reason"] for r in records))},
+             "evidence_usage":{"turns_with_retrieved_evidence":sum(bool(e.get("retrieved_evidence_in_view")) for e in steps),
+                 "turns_citing_visible_evidence":sum(bool(e.get("cited_evidence_ids")) for e in steps),
+                 "turns_citing_retrieved_evidence":sum(bool(set(e.get("retrieved_evidence_in_view", [])) &
+                                                            set(e.get("cited_evidence_ids", []))) for e in steps)},
              "mean_total_tokens":sum(r["costs"]["charged_tokens"] for r in records)/max(1,n),
              "parameters_unchanged_during_eval":True,"memory_unchanged":True,
              "frozen_base_parameters_unchanged":True if base_before is not None else None,"evaluation_contract":contract,
              "results_sha256":file_sha(result),"task_ids_sha256":digest(sorted(ids))}
+    summary["decision_recovery"] = recovery_diagnostics([e for r in records for e in r["history"] if e["phase"] == "execute"] +
+                                                      [e for r in records for e in r["manager_operations"]])
     atomic_json(output/"summary.json",summary)
     atomic_json(output/"status.json",{"phase":"complete","completed":n,"expected":n})
     return summary

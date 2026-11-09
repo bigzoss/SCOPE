@@ -116,24 +116,55 @@ class StateAtlas:
                 return {"idempotent": True, **saved}
             if self.revision != expected_revision:
                 raise ContractError("STALE_REVISION")
+            slot = checked.get("state_slot")
+            typed_old = [old for old in self.nodes("Claim") if slot and
+                         (old["entity"], old.get("state_slot")) == (checked["entity"], slot)]
+            superseded_ids = {checked["supersedes"]} if checked.get("supersedes") else set()
+            if typed_old:
+                observed = checked["observed_at_revision"]
+                newest = max(old["observed_at_revision"] for old in typed_old)
+                if observed < newest:
+                    raise ContractError("STALE_SLOT_EVIDENCE")
+                identical = next((old for old in typed_old if old["value"] == checked["value"] and
+                                  old["support_status"] == checked["support_status"]), None)
+                needs_refresh = checked["predicate"] in {"price", "selected_color", "selected_spec"} and observed > newest
+                if len(typed_old) == 1 and identical and not superseded_ids and not needs_refresh:
+                    return {"kind": "unchanged", "payload": {"node_id": identical["id"]}, "revision": self.revision}
+                if observed > newest or checked["support_status"] == "supported":
+                    superseded_ids.update(old["id"] for old in typed_old if
+                        (observed > old["observed_at_revision"] and checked["support_status"] == "supported") or
+                        (old["support_status"] == "pending" and (observed > old["observed_at_revision"] or
+                                                                 checked["support_status"] == "supported")))
             rev = self._advance()
             node = {**checked, "scope": plain(self.scope), "revision": rev}
             node_id = node["id"]
-            superseded=node.get("supersedes")
-            if superseded:
+            for superseded in sorted(superseded_ids):
                 old=self.node(superseded)
                 if old["kind"]!="Claim" or not old["active"] or old.get("protected"):raise ContractError("Invalid supersession")
-                self.db.execute("UPDATE nodes SET active=0 WHERE id=?",(superseded,))
+                old.pop("active")
+                old["valid_until_revision"] = rev
+                self.db.execute("UPDATE nodes SET active=0,body=? WHERE id=?",(canonical(old),superseded))
                 self.db.execute("INSERT INTO edges VALUES(?,?,?)",(node_id,"SUPERSEDES",superseded))
             previous = self.nodes("Claim") if node["kind"] == "Claim" else []
             for old in previous:
-                if node["predicate"] in {"price","selected_color","requirement"} and (old["entity"], old["predicate"]) == (node["entity"], node["predicate"]) and old["value"] != node["value"]:
+                comparable = (slot and old.get("state_slot") == slot) or (
+                    not slot and node["predicate"] in {"price","selected_color","requirement"})
+                if comparable and (old["entity"], old["predicate"]) == (node["entity"], node["predicate"]) and old["value"] != node["value"]:
                     # A value changing over time is not itself a logical contradiction.
                     relation="DIFFERS_FROM"
                     if old.get("observed_at_revision")==node.get("observed_at_revision"):
                         relation="CONTRADICTS";node["conflicted"]=True;old["conflicted"]=True
                         self.db.execute("UPDATE nodes SET body=? WHERE id=?",(canonical(old),old["id"]))
                     self.db.execute("INSERT OR IGNORE INTO edges VALUES(?,?,?)", (node_id, relation, old["id"]))
+            if slot:
+                subjects = [node["entity"]]
+                target = node["value"]
+                if isinstance(target, str) and node["predicate"] in {"agent_location", "object_location", "current_candidate"}:
+                    subjects.append(target)
+                    self.db.execute("INSERT OR IGNORE INTO edges VALUES(?,?,?)", (node_id, "TARGETS", target))
+                for subject in subjects:
+                    self.db.execute("INSERT OR IGNORE INTO nodes VALUES(?,?,?,1)",
+                                    (subject, "Entity", canonical({"id":subject,"scope":plain(self.scope)})))
             self.db.execute("INSERT INTO nodes VALUES(?,?,?,1)", (node_id, node["kind"], canonical(node)))
             for ref in node.get("evidence_refs", []):
                 self.evidence(ref["id"])
@@ -156,7 +187,9 @@ class StateAtlas:
             if self.revision != expected_revision:
                 raise ContractError("STALE_REVISION")
             rev = self._advance()
-            self.db.execute("UPDATE nodes SET active=0 WHERE id=?", (node_id,))
+            node.pop("active")
+            node["valid_until_revision"] = rev
+            self.db.execute("UPDATE nodes SET active=0,body=? WHERE id=?", (canonical(node), node_id))
             return self._event("retire", {"node_id": node_id,"proposal_hash":proposal_hash}, rev, proposal_id)
 
     def save_view(self, selected_ids, summary=None):

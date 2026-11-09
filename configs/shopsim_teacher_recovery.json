@@ -1,0 +1,99 @@
+{
+  "seed": 233,
+  "split_seed": 233,
+  "deterministic": true,
+  "gpu": 1,
+  "data_root": "/home/hyx/lm_workspace/MA-GRPO/data/shopsimulator",
+  "model": {
+    "path": "/home/hyx/lm_workspace/download/models/Qwen3-8B",
+    "rank": 16,
+    "alpha": 32
+  },
+  "environment": {
+    "base_url": "http://127.0.0.1:5112",
+    "python": "/home/hyx/lm_workspace/longagent/.venv-shopsim/bin/python",
+    "longagent_root": "/home/hyx/lm_workspace/longagent",
+    "shop_root": "/home/hyx/lm_workspace/longagent/external/ShopSimulator-code",
+    "java_home": "/home/hyx/lm_workspace/longagent/.java",
+    "manifest": "/home/hyx/lm_workspace/MA-GRPO/data/shopsimulator/manifests/grpo_train_dev.json",
+    "train_products": "/home/hyx/lm_workspace/download/datasets/ShopSimulator/fine_items_train_standard.jsonl",
+    "eval_products": "/home/hyx/lm_workspace/download/datasets/ShopSimulator/fine_items_eval_standard.jsonl"
+  },
+  "runtime": {
+    "max_turns": 12,
+    "actor_max_input": 6144,
+    "actor_max_new": 256,
+    "manager_max_input": 2048,
+    "manager_max_new": 192,
+    "manager_episode_tokens": 1536,
+    "total_tokens": 100000,
+    "retrievals": 6,
+    "probe_query_horizon": 1,
+    "invalid_weight": 0.05,
+    "cost_weight": 0.02,
+    "decision_evidence": true,
+    "state_graph": true,
+    "loop_policy": "state",
+    "decision_recovery": true,
+    "memory_choice": false,
+    "action_mode": "grounded",
+    "shared_memory": true,
+    "compact_actor_view": true,
+    "actor_history_turns": 2
+  },
+  "training": {
+    "method": "conditional",
+    "role": "manager",
+    "updates": 48,
+    "group_size": 4,
+    "local_group_size": 4,
+    "lr": 1E-05,
+    "clip": 0.2,
+    "kl_beta": 0.01,
+    "local_weight": 0.25,
+    "alternating_window": 8,
+    "probe_turn": 1,
+    "probe_updates": [
+      4,
+      8,
+      12,
+      16,
+      20,
+      24,
+      28,
+      32,
+      36,
+      40,
+      44,
+      48
+    ],
+    "curriculum": [
+      {
+        "through": 16,
+        "length": 1
+      },
+      {
+        "through": 32,
+        "length": 2
+      },
+      {
+        "through": 48,
+        "length": 4
+      }
+    ],
+    "local_credit": "paired",
+    "local_repeats": 2,
+    "local_continuation": "greedy",
+    "probe_opportunities": [
+      "missing_evidence",
+      "public_confirmation_gap",
+      "conflicting_evidence",
+      "context_threshold",
+      "decision_recovery",
+      "stalled_or_invalid_action"
+    ]
+  },
+  "evaluation": {
+    "sequence_length": 2
+  }
+}

@@ -37,6 +37,8 @@ class Sample:
     termination: str = "eos"
     advantage: float = 0.0
     credit_scope: str = "global"
+    choice_token_ids: list[int] = field(default_factory=list)
+    origin: str = "policy"
 
 
 @dataclass
@@ -89,9 +91,11 @@ class Boundary:
     working: dict = field(default_factory=dict)
     task_index: int = 0
     continuation_tasks: list[str] = field(default_factory=list)
+    opportunity: str | None = None
 
     def fingerprint(self):
         return digest({"scope": self.scope, "atlas": self.atlas, "environment": self.environment,
                        "budget": self.budget, "goal": self.goal, "observation": self.observation,
                        "history": self.history, "working":self.working,"costs":self.costs,"invalid":self.invalid,
-                       "continuation_tasks":self.continuation_tasks,"phase": self.phase, "versions": self.role_versions})
+                       "continuation_tasks":self.continuation_tasks,"phase": self.phase, "versions": self.role_versions,
+                       "opportunity":self.opportunity})

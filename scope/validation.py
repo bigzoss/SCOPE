@@ -6,19 +6,38 @@ from .contracts import ContractError
 from .io import digest
 
 PRICE = re.compile(r"(?:(?:价格|售价|现价|单价)\s*[:：]?\s*[¥￥]?\s*)(\d+(?:\.\d+)?)(?:\s*元)?|[¥￥]\s*(\d+(?:\.\d+)?)(?:\s*元)?")
-_SELECTED=re.compile(r"(?:^|\n|\[SEP\])\s*(?P<field>(?:已选颜色|已选择颜色)\s*[:：]\s*(?P<value>[^\n，,;；。\[]+))")
+_SELECTED=re.compile(r"(?:^|\n|\[SEP\])\s*(?P<field>(?:已选颜色|已选择颜色|selected colou?r)\s*[:：]\s*(?P<value>[^\n，,;；。\[]+))", re.I)
 PREDICATES = {"quoted_text", "requirement", "price", "available_option", "selected_color", "attempted_action"}
 
 
+def public_prices(text):
+    for match in PRICE.finditer(text):
+        prefix = text[max(0, match.start()-8):match.start()]
+        suffix = text[match.end():match.end()+8].lstrip()
+        if re.search(r"(?:不是|并非|不含|不高于|不低于|高于|低于|大于|小于|至少|至多|未确认)\s*$", prefix):
+            continue
+        if re.match(r"(?:起|以上|以下|以内|左右|到|至|[-~～])", suffix):
+            continue
+        yield match
+
+
 class Validator:
-    def __init__(self,semantic_validation=True):
+    def __init__(self,semantic_validation=True, adapter=None):
         self.semantic_validation=semantic_validation
+        self.adapter = adapter
+        self.domain_predicates = getattr(adapter, "state_predicates", frozenset())
+
+    def public_facts(self, record):
+        if self.adapter and record["kind"] == "observation" and not record.get("terminal"):
+            return tuple(self.adapter.public_facts(record))
+        return ()
 
     def check(self, atlas, proposal):
         if proposal.get("expected_revision") != atlas.revision:
             raise ContractError("STALE_REVISION")
         predicate = proposal.get("predicate")
-        if predicate not in PREDICATES:
+        domain = predicate in self.domain_predicates
+        if predicate not in PREDICATES and not domain:
             raise ContractError("UNREGISTERED_PREDICATE")
         status = proposal.get("support_status", "pending")
         if status not in {"supported", "pending"}:
@@ -29,11 +48,12 @@ class Validator:
         if predicate=="price":
             if type(value) not in (int,float) or not math.isfinite(value) or value<0:
                 raise ContractError("Price requires a finite nonnegative number, not a boolean")
-        elif not isinstance(value,str) or not value.strip():
+        elif not (domain and type(value) is bool) and (not isinstance(value,str) or not value.strip()):
             raise ContractError("Text predicates require a nonempty string")
         entity = proposal.get("entity", "task")
-        entity_node=atlas.node(entity)
-        if entity_node["kind"]!="Entity" or not entity_node["active"]:raise ContractError("Claim subject must be a public active entity")
+        if not domain:
+            entity_node=atlas.node(entity)
+            if entity_node["kind"]!="Entity" or not entity_node["active"]:raise ContractError("Claim subject must be a public active entity")
         refs = proposal.get("evidence_refs", [])
         if not isinstance(refs, list) or not refs:
             raise ContractError("Evidence references required, including for pending claims")
@@ -46,15 +66,23 @@ class Validator:
             start, end = ref["start"], ref["end"]
             if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(record["text"]):
                 raise ContractError("Invalid evidence span")
-            if entity != "task" and record["entity"] != entity:
+            if not domain and entity != "task" and record["entity"] != entity:
                 raise ContractError("WRONG_ENTITY_EVIDENCE")
-            if record["scope"] != atlas.export()["scope"]:
+            if record["scope"] != vars(atlas.scope):
                 raise ContractError("CROSS_SCOPE_EVIDENCE")
             spans.append(record["text"][start:end]); records.append(record)
         quote = "\n".join(spans)
         supported = False
+        domain_matches = [(f, record, ref) for record, ref in zip(records, refs) for f in self.public_facts(record)
+                          if f.entity == entity and f.predicate == predicate and f.value == value
+                          and (type(f.value) is type(value) or predicate == "price")
+                          and ref["start"] <= f.start < f.end <= ref["end"]]
         matching_prices=[]
-        if predicate == "requirement":
+        if domain:
+            if not domain_matches:
+                raise ContractError("EVIDENCE_DOES_NOT_BIND_DOMAIN_SLOT")
+            supported = any(f.status == "supported" for f, _, _ in domain_matches)
+        elif predicate == "requirement":
             supported = any(r["kind"]=="requirement" and value==r["text"] and ref["start"]==0 and ref["end"]==len(r["text"])
                             for r,ref in zip(records,refs))
         elif predicate == "quoted_text":
@@ -63,12 +91,8 @@ class Validator:
         elif predicate == "price":
             for record,ref in zip(records,refs):
                 if record["kind"]!="observation" or entity=="task":continue
-                for match in PRICE.finditer(record["text"]):
+                for match in public_prices(record["text"]):
                     if not ref["start"]<=match.start()<match.end()<=ref["end"]:continue
-                    prefix=record["text"][max(0,match.start()-8):match.start()]
-                    suffix=record["text"][match.end():match.end()+8].lstrip()
-                    if re.search(r"(?:不是|并非|不含|不高于|不低于|高于|低于|大于|小于|至少|至多|未确认)\s*$",prefix):continue
-                    if re.match(r"(?:起|以上|以下|以内|左右|到|至|[-~～])",suffix):continue
                     if float(match.group(1) or match.group(2))==float(value):matching_prices.append(match.group(0))
             supported=bool(matching_prices)
         elif predicate == "available_option":
@@ -81,7 +105,7 @@ class Validator:
         elif predicate == "attempted_action":
             supported = any(r["kind"]=="action_receipt" and value==r["text"] and ref["start"]==0 and ref["end"]==len(r["text"])
                             for r,ref in zip(records,refs))
-        if status == "supported" and not supported and self.semantic_validation:
+        if status == "supported" and not supported and (self.semantic_validation or domain):
             raise ContractError("EVIDENCE_DOES_NOT_SUPPORT_PREDICATE")
         unit=proposal.get("unit")
         if predicate=="price":
@@ -96,6 +120,13 @@ class Validator:
                 "validation_mode":"semantic_checked" if self.semantic_validation else "semantic_check_ablated",
                 "unit": unit, "polarity": proposal.get("polarity", "positive"),
                 "protected": predicate == "requirement"}
+        if domain_matches:
+            matching = [(record, ref) for f, record, ref in domain_matches if status == "pending" or f.status == "supported"]
+            if matching:
+                node["observed_at_revision"] = max(record["revision"] for record, _ in matching)
+                node["evidence_refs"] = list({(ref["id"], ref["start"], ref["end"]): ref for _, ref in matching}.values())
+            node["state_slot"] = predicate + (":" + value.split(":", 1)[0] if predicate == "selected_spec" else "")
+            node["validity"] = "current_until_superseded" if status == "supported" else "pending_public_confirmation"
         if node["polarity"] != "positive":
             raise ContractError("Negative semantics require a registered predicate; use a literal quote")
         node["id"] = "claim_" + digest([atlas.scope.key, node, atlas.revision])[:24]
@@ -108,6 +139,8 @@ class Validator:
             raise ContractError("Summary requires at most 12 source-mapped items")
         checked = []
         for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("evidence_ref"), dict):
+                raise ContractError("Malformed summary item")
             ref = item.get("evidence_ref", {})
             record = atlas.evidence(ref.get("id"))
             a, b = ref.get("start"), ref.get("end")

@@ -59,3 +59,61 @@ def interaction(q00,q01,q10,q11):
     return {"context_at_original":q01-q00,"context_at_revised":q11-q10,
             "interaction":q11-q10-q01+q00}
 
+
+def paired_local_samples(boundary, candidates, baselines, cost_weight):
+    """Strict task utility is paired by continuation seed. Compression is a bounded tie-breaker."""
+    if not baselines or any(len(c["outcomes"]) != len(baselines) for c in candidates):
+        raise ContractError("Every local candidate requires the same continuation seeds as FINISH")
+    if any(c["boundary_hash"] != boundary.fingerprint() for c in candidates):
+        raise ContractError("Paired candidates crossed pre-action boundaries")
+    if any(c["sample"].role != "manager" or c["sample"].phase != boundary.phase or
+           c["sample"].version != boundary.role_versions["manager"] or c["sample"].origin != "policy" for c in candidates):
+        raise ContractError("Credit cannot cross role, version, or phase boundaries")
+    if candidates and any(c["sample"].prompt_ids != candidates[0]["sample"].prompt_ids for c in candidates):
+        raise ContractError("Paired candidates saw different pre-action prompts")
+    baseline_success = [int(o.metrics["success"]) for o in baselines]
+    valid = [i for i, c in enumerate(candidates) if c["accepted"]]
+    returns, savings, strict_values, retention = [], [], [], []
+
+    def preserves(candidate, baseline):
+        left = next((e for e in baseline.events if e["phase"] == "execute"), None)
+        right = next((e for e in candidate.events if e["phase"] == "execute"), None)
+        return left is not None and right is not None and set(left["required_evidence_ids"]) <= set(right["context_evidence_ids"])
+
+    for c in candidates:
+        strict = [int(o.metrics["success"]) for o in c["outcomes"]]
+        strict_values.append(strict)
+        returns.append(float(np.mean([a - b for a, b in zip(strict, baseline_success)])))
+        kept = all(preserves(o, b) for o, b in zip(c["outcomes"], baselines))
+        retention.append(kept)
+        if c["operation"] == "SUMMARIZE" and kept and all(strict) and all(baseline_success):
+            saving = float(np.mean([(b.costs["charged_tokens"] - o.costs["charged_tokens"]) /
+                                   max(1, b.costs["charged_tokens"]) for o, b in zip(c["outcomes"], baselines)]))
+        else:
+            saving = 0.
+        savings.append(max(-1., min(1., saving)))
+    centered = standardize([returns[i] for i in valid])
+    task_zero_variance = not any(centered)
+    weighted, advantages = [], [0.] * len(candidates)
+    for index, advantage in zip(valid, centered):
+        # Small successful compression differences must not be amplified by normalization.
+        if task_zero_variance and len(valid) >= 2:
+            advantage = cost_weight * savings[index]
+        sample = candidates[index]["sample"]
+        sample.advantage, sample.credit_scope = advantage, "paired:" + boundary.phase
+        advantages[index] = advantage
+        if advantage:
+            weighted.append((sample, 1 / len(valid)))
+    return weighted, {"phase": boundary.phase, "opportunity": boundary.opportunity,
+        "baseline_strict": baseline_success, "candidate_strict": strict_values, "strict_deltas": returns,
+        "advantages": advantages, "valid_candidates": len(valid), "operations": [c["operation"] for c in candidates],
+        "task_zero_variance": task_zero_variance, "zero_variance": not any(advantages),
+        "non_task_only_advantage": task_zero_variance and any(advantages),
+        "baseline_success_count":sum(baseline_success),
+        "candidate_success_count":sum(sum(values) for values in strict_values),
+        "positive_effect_candidates":sum(returns[i] > 0 for i in valid),
+        "negative_effect_candidates":sum(returns[i] < 0 for i in valid),
+        "all_branches_failed":not any(baseline_success) and not any(any(values) for values in strict_values),
+        "candidate_origin":"student_policy", "teacher_scores_used_as_reward":False,
+        "required_evidence_preserved": retention, "compression_token_savings_fraction": savings}
+

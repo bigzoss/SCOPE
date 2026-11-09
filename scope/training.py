@@ -6,9 +6,9 @@ from dataclasses import asdict
 from pathlib import Path
 from .checkpoint import save_checkpoint,load_checkpoint
 from .contracts import ContractError
-from .credit import global_samples,local_samples
+from .credit import global_samples,local_samples,paired_local_samples
 from .io import atomic_json,append_jsonl,digest,read_jsonl
-from .rollout import EpisodeRunner
+from .rollout import EpisodeRunner,capture_rng,restore_rng
 
 
 def journal_outcome(path,outcome,identity):
@@ -38,10 +38,43 @@ def local_rollouts(runner,boundary,continuation_tasks,group_size,mode):
     return candidates
 
 
+def paired_rollouts(runner, boundary, group_size, repeats, greedy, seed):
+    # Sample from the current manager before isolating the downstream random streams.
+    samples = [runner.sample_boundary(boundary) for _ in range(group_size)]
+    outside_rng = capture_rng()
+    seeds = [int(digest([seed, index])[:8], 16) for index in range(repeats)]
+
+    def continue_with(intervention):
+        outcomes = []
+        for pair_seed in seeds:
+            restore_rng(boundary.rng)
+            outcomes.append(runner.run(boundary.scope.task, boundary.scope.episode, boundary=boundary,
+                                       forced=intervention, greedy=greedy, pair_seed=pair_seed))
+        return outcomes
+
+    try:
+        baselines = continue_with("FINISH")
+        candidates = []
+        for sample in samples:
+            outcomes = continue_with(sample)
+            initial = [o.events[0]["result"] for o in outcomes]
+            if any(x != initial[0] for x in initial):
+                raise ContractError("The pre-action intervention differs across paired seeds")
+            candidates.append({"boundary_hash": boundary.fingerprint(), "sample": sample, "outcomes": outcomes,
+                               "accepted": bool(initial[0]["accepted"]), "operation": initial[0].get("operation")})
+        return baselines, candidates, seeds
+    finally:
+        restore_rng(outside_rng)
+
+
 def train(policy,env,registry,config,output,receipt,experience=None,resume=None,stop_after=None):
     import torch
     output=Path(output)
     cfg=config["training"];runtime=config["runtime"]
+    selector = None
+    if cfg.get("teacher_probe_hints"):
+        from .probe_selection import TeacherProbeSelector
+        selector = TeacherProbeSelector(cfg["teacher_probe_hints"], registry.ids("rl_train"))
     role_mode=cfg.get("role","manager")
     optimizers={role:torch.optim.AdamW(policy.parameters(role),lr=cfg.get("lr",1e-5),weight_decay=0.)
                 for role in ("manager","actor")}
@@ -59,9 +92,10 @@ def train(policy,env,registry,config,output,receipt,experience=None,resume=None,
         policy.versions={"manager":0,"actor":0}
     if not resume:
         save_checkpoint(output/"checkpoints",0,policy,optimizers,receipt_hash)
-    runner=EpisodeRunner(policy,env,runtime,"train",experience)
+    runner=EpisodeRunner(policy,env,runtime,"train",experience,probe_selector=selector)
     updates=cfg.get("updates",48)
     mode=cfg.get("method","conditional")
+    paired = cfg.get("local_credit") == "paired"
     if mode not in {"global","window","conditional"}:raise ContractError("Unknown GRPO method")
     group_size=cfg.get("group_size",4)
     if group_size<2:raise ContractError("GRPO needs group_size >= 2")
@@ -83,8 +117,10 @@ def train(policy,env,registry,config,output,receipt,experience=None,resume=None,
             for branch in range(group_size):
                 outcomes=[]
                 for index,task in enumerate(tasks):
-                    outcome=runner.run(task,f"step{step}:task{index}",capture_phase=phase if branch==0 and index==0 else None,
-                                       capture_turn=cfg.get("probe_turn",1))
+                    candidate_capture = phase if branch == 0 and boundary is None and (paired or index == 0) else None
+                    outcome=runner.run(task,f"step{step}:task{index}",capture_phase=candidate_capture,
+                                       capture_turn=cfg.get("probe_turn",1),capture_opportunity=bool(paired and candidate_capture),
+                                       **({"probe_opportunities":cfg["probe_opportunities"]} if cfg.get("probe_opportunities") else {}))
                     outcomes.append(outcome)
                     for saved_boundary in outcome.boundaries:
                         saved_boundary.continuation_tasks=tasks[index+1:]
@@ -93,15 +129,40 @@ def train(policy,env,registry,config,output,receipt,experience=None,resume=None,
                         boundary=outcome.boundaries[0];remaining=tasks[index+1:]
                 branches.append(outcomes)
             global_weighted,global_info=global_samples(branches,role)
+            # In paired mode the manager learns from its intervention, not unrelated actor variation.
+            if paired and role == "manager":
+                global_weighted = []
             local_weighted=[];local_info=None;probe_cost={"queries":0,"tokens":0,"actor_turns":0}
             if boundary:
-                candidates=local_rollouts(runner,boundary,remaining,cfg.get("local_group_size",4),mode)
-                for i,candidate in enumerate(candidates):
+                if paired:
+                    baselines, candidates, seeds = paired_rollouts(runner, boundary, cfg.get("local_group_size",4),
+                        cfg.get("local_repeats",1), cfg.get("local_continuation","greedy")=="greedy",
+                        [config.get("seed",233),step])
+                    local_weighted,local_info = paired_local_samples(boundary, candidates, baselines, cfg.get("local_cost_weight",.05))
+                    local_info["continuation_seeds"] = seeds
+                    local_info["boundary_hash"] = boundary.fingerprint()
+                    local_info["global_manager_credit_applied"] = False
+                    local_info["probe_selection"] = "offline_teacher_prefix_match" if selector else "opportunity_filter"
+                    local_logs = [{"outcomes": baselines, "kind": "local_baseline"}] + candidates
+                    sampling = {"manager_input": sum(len(c["sample"].prompt_ids) for c in candidates),
+                                "manager_output": sum(len(c["sample"].completion_ids) for c in candidates)}
+                    probe_cost["candidate_sampling_tokens"] = sum(sampling.values())
+                    probe_cost["actual_model_tokens"] = {"manager_input": 0, "manager_output": 0, "actor_input": 0, "actor_output": 0}
+                else:
+                    candidates=local_rollouts(runner,boundary,remaining,cfg.get("local_group_size",4),mode)
+                    local_weighted,local_info=local_samples(boundary,candidates,mode=mode)
+                    local_logs = candidates
+                for i,candidate in enumerate(local_logs):
                     for j,outcome in enumerate(candidate["outcomes"]):
-                        journal_outcome(output/"trajectories.jsonl",outcome,{"step":step,"branch":i,"query":j,"kind":"local"})
+                        journal_outcome(output/"trajectories.jsonl",outcome,{"step":step,"branch":i,"query":j,"kind":candidate.get("kind","local")})
                         probe_cost["queries"]+=1;probe_cost["tokens"]+=outcome.costs["charged_tokens"]
                         probe_cost["actor_turns"]+=outcome.costs["actor_turns"]
-                local_weighted,local_info=local_samples(boundary,candidates,mode=mode)
+                        if paired:
+                            for key, value in outcome.costs["continuation_token_breakdown"].items():
+                                probe_cost["actual_model_tokens"][key] += value
+                if paired:
+                    for key, value in sampling.items():
+                        probe_cost["actual_model_tokens"][key] -= (len(seeds) - 1) * value
             elif probe:
                 local_info={"skipped":"selected_boundary_not_reached_or_manager_budget_exhausted"}
             before=policy.fingerprint(role);other="actor" if role=="manager" else "manager"
@@ -111,6 +172,10 @@ def train(policy,env,registry,config,output,receipt,experience=None,resume=None,
             after=policy.fingerprint(role)
             if policy.fingerprint(other)!=frozen:raise ContractError("Frozen role parameters changed")
             info={"step":step,"role":role,"length":length,"global":global_info,"local":local_info,"probe_cost":probe_cost,
+                  "local_credit": "paired" if paired else "legacy",
+                  "task_policy_gradient": ((bool(local_weighted) and cfg.get("local_weight", .25) > 0 and not local_info["task_zero_variance"])
+                                           if paired and role == "manager" else not global_info["task_zero_variance"]),
+                  "kl_only_update": bool(metrics["optimizer_step"] and not any(s.advantage and w for s, w in weighted)),
                   "global_queries":sum(map(len,branches)),"parameter_hash_before":before,"parameter_hash_after":after,
                   "parameters_changed":before!=after,"frozen_role_unchanged":True,
                   "elapsed_wall_seconds":time.perf_counter()-begin,
@@ -129,6 +194,9 @@ def train(policy,env,registry,config,output,receipt,experience=None,resume=None,
                 "method":mode,"global_queries":sum(r["global_queries"] for r in committed),
                 "probe_queries":sum(r["probe_cost"]["queries"] for r in committed),
                 "updates_with_parameter_change":sum(r["parameters_changed"] for r in committed),
+                "updates_with_task_policy_gradient":sum(r.get("task_policy_gradient",False) for r in committed),
+                "kl_only_updates":sum(r.get("kl_only_update",False) for r in committed),
+                "paired_opportunity_updates":sum(bool((r.get("local") or {}).get("opportunity")) for r in committed),
                 "frozen_role_unchanged":all(r["frozen_role_unchanged"] for r in committed)})
     atomic_json(output/"status.json",{"phase":"complete" if completed==updates else "stopped_at_update_boundary",
         "completed_updates":max(start,completed),"updates":updates,"complete":completed==updates})

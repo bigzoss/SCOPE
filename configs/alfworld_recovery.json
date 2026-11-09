@@ -1,0 +1,81 @@
+{
+  "seed": 233,
+  "split_seed": 233,
+  "deterministic": true,
+  "gpu": 2,
+  "data_root": "/home/hyx/lm_workspace/MA-GRPO/data/shopsimulator",
+  "model": {
+    "path": "/home/hyx/lm_workspace/download/models/Qwen3-8B",
+    "rank": 16,
+    "alpha": 32
+  },
+  "environment": {
+    "kind": "alfworld_http",
+    "base_url": "http://127.0.0.1:5088",
+    "manifest": "/home/hyx/lm_workspace/longagent/outputs/alfworld_teica20/teica-v7-alfworld-gpu5-train20-20261018-v1/alfworld_manifest.json"
+  },
+  "runtime": {
+    "max_turns": 30,
+    "actor_max_input": 6144,
+    "actor_max_new": 256,
+    "manager_max_input": 2048,
+    "manager_max_new": 192,
+    "manager_episode_tokens": 1536,
+    "total_tokens": 100000,
+    "retrievals": 6,
+    "probe_query_horizon": 1,
+    "invalid_weight": 0.05,
+    "cost_weight": 0.02,
+    "decision_evidence": true,
+    "state_graph": true,
+    "loop_policy": "state",
+    "decision_recovery": true,
+    "memory_choice": true,
+    "action_mode": "grounded",
+    "shared_memory": true
+  },
+  "training": {
+    "method": "global",
+    "role": "manager",
+    "updates": 48,
+    "group_size": 4,
+    "local_group_size": 4,
+    "lr": 1E-05,
+    "clip": 0.2,
+    "kl_beta": 0.01,
+    "local_weight": 0.25,
+    "alternating_window": 8,
+    "probe_turn": 1,
+    "probe_updates": [
+      4,
+      8,
+      12,
+      16,
+      20,
+      24,
+      28,
+      32,
+      36,
+      40,
+      44,
+      48
+    ],
+    "curriculum": [
+      {
+        "through": 16,
+        "length": 1
+      },
+      {
+        "through": 32,
+        "length": 2
+      },
+      {
+        "through": 48,
+        "length": 4
+      }
+    ]
+  },
+  "evaluation": {
+    "sequence_length": 2
+  }
+}

@@ -7,6 +7,7 @@ import requests
 from .contracts import ContractError,InfrastructureError
 from .data import SplitRegistry
 from .interaction import ActionAdapter, Binding
+from .state_graph import ALF_PREDICATES, alfworld_facts
 from .io import digest,file_sha
 
 CONTRACT="alfworld-text-public-v1"
@@ -14,6 +15,8 @@ SYSTEM=("You are an agent in a household text environment. Complete the public t
         "and exactly one line Action: command. Commands: look; inventory; go to receptacle; open receptacle; "
         "close receptacle; take object from receptacle; put object in/on receptacle; clean object with sinkbasin; "
         "heat object with microwave; cool object with fridge; use desklamp. Use exact observed object names/numbers. "
+        "Use inventory, not check inventory. A task saying look at an object under a lamp is a goal, not an action command. "
+        "Check possession and task prerequisites before using a device. "
         "An attempted command is not a confirmed state change. Do not invent observations.")
 
 
@@ -34,9 +37,76 @@ _COMMANDS = tuple(re.compile(pattern) for pattern in (
 
 class ALFWorldActions(ActionAdapter):
     parse = staticmethod(parse_command)
+    state_predicates = ALF_PREDICATES
+    public_facts = staticmethod(alfworld_facts)
+
+    def decision_targets(self, state, goal):
+        result = []
+        for entity in state.get("entities", []):
+            kind = entity.rsplit(" ", 1)[0]
+            if re.search(r"\b" + re.escape(kind) + r"\b", goal.lower()):
+                result.append(("alf:" + entity, "object_location"))
+                if entity not in state.get("held", []):
+                    result.append(("alf:" + entity, "held"))
+        return result[:8]
+
+    def recovery_candidates(self, state, goal):
+        # Navigation is grounded in observed receptacles, never in hidden admissible commands.
+        locations = {"bed", "desk", "drawer", "cabinet", "shelf", "countertop", "fridge", "microwave",
+                     "sinkbasin", "bathtubbasin", "garbagecan", "laundryhamper", "safe", "diningtable",
+                     "sidetable", "coffeetable", "dresser", "toilet", "sofa", "armchair", "ottoman", "tvstand"}
+        here = state.get("location")
+        visited = set(state.get("visited_locations", []))
+        if here and state.get("containers", {}).get(here) is False:
+            yield {"command": "open " + here, "reason": "inspect_publicly_closed_container"}
+        for obj, place in state.get("object_locations", {}).items():
+            if place == here and obj not in state.get("held", []) and obj.rsplit(" ", 1)[0] in goal.lower():
+                yield {"command": f"take {obj} from {place}", "reason": "inspect_goal_object_at_observed_location"}
+        # Candidates describe public preconditions, never assert task completion.
+        for obj in state.get("held", []):
+            if here and here.rsplit(" ", 1)[0] in locations and state.get("containers", {}).get(here) is not False:
+                yield {"command": f"put {obj} in/on {here}", "reason": "place_held_object_at_current_location"}
+            for verb, device in (("clean", "sinkbasin"), ("heat", "microwave"), ("cool", "fridge")):
+                if here and here.rsplit(" ", 1)[0] == device:
+                    yield {"command": f"{verb} {obj} with {here}", "reason": "process_held_object_at_observed_device"}
+            for lamp, place in state.get("object_locations", {}).items():
+                if place == here and lamp.startswith("desklamp "):
+                    yield {"command": f"use {lamp}", "reason": "use_observed_lamp_while_holding_object"}
+        for place in sorted(state.get("entities", []), key=lambda x: (x in visited, x)):
+            if place != here and place.rsplit(" ", 1)[0] in locations:
+                yield {"command": "go to " + place, "reason": "revisit_observed_location" if place in visited else "explore_observed_location"}
+
+    def focus_entities(self, state):
+        return ["alf:" + entity for entity in [state.get("location"), *state.get("held", [])] if entity]
+
+    def confirmation_target(self, command, entity):
+        change = re.fullmatch(rf"(take|put|open|close|clean|heat|cool) ({_ENTITY})(?: .+)?", command)
+        if not change:
+            return None
+        verb, name = change.groups()
+        predicate, value = {
+            "take": ("held", True), "put": ("held", False),
+            "open": ("container_open", True), "close": ("container_open", False),
+            "clean": ("cleaned", True), "heat": ("temperature", "hot"), "cool": ("temperature", "cold"),
+        }[verb]
+        return "alf:" + name, predicate, value
+
+    def recovery_slots(self, command):
+        if not command:
+            return ()
+        placement = re.fullmatch(rf"put ({_ENTITY}) in/on ({_ENTITY})", command)
+        treatment = re.fullmatch(rf"(?:clean|heat|cool) ({_ENTITY}) with ({_ENTITY})", command)
+        if placement or treatment:
+            obj, container = (placement or treatment).groups()
+            return (("alf:"+obj,"held"), ("alf:"+obj,"object_location"), ("alf:"+container,"container_open"))
+        return ()
 
     def normalize(self, command):
         command = " ".join(command.lower().removesuffix(".").split())
+        if command == "check inventory":
+            return "inventory"
+        # 'receptacle' is a schema placeholder, not part of the observed entity name.
+        command = re.sub(r"^(go to|open|close) receptacle (?=" + _ENTITY + r"$)", r"\1 ", command)
         return re.sub(r"^(put .+?) (?:in|on) (.+)$", r"\1 in/on \2", command)
 
     def bind(self, command, state):
@@ -64,6 +134,7 @@ class ALFWorldActions(ActionAdapter):
         place = re.search(rf"you (?:arrive at|are facing) (?:the )?({_ENTITY})\b", text)
         if place:
             state["location"] = place[1]
+            state["visited_locations"] = sorted(set(previous.get("visited_locations", [])) | {place[1]})
         elif "you are in the middle of a room" in text:
             state["location"] = "room"
         carrying = re.search(r"you (?:are carrying|have in your inventory)\s*:?\s*([^\n.]+)", text)
@@ -93,6 +164,18 @@ class ALFWorldActions(ActionAdapter):
             treatments = previous.get("treatments", {})
             update = {"clean": True} if treated[1] == "clean" else {"temperature": treated[1]}
             state["treatments"] = {**treatments, treated[2]: {**treatments.get(treated[2], {}), **update}}
+        object_locations = dict(previous.get("object_locations", {}))
+        for fact in alfworld_facts({"text": observation}):
+            if fact.predicate == "object_location":
+                object_locations[fact.entity.removeprefix("alf:")] = fact.value.removeprefix("alf:")
+        for obj, location in re.findall(rf"\b({_ENTITY}) (?:is )?(?:in/on|on|in|inside) (?:the )?({_ENTITY})\b", text):
+            object_locations[obj] = location
+        if taken:
+            object_locations[taken[1]] = "agent"
+        elif placed:
+            object_locations[placed[1]] = placed[2]
+        if object_locations:
+            state["object_locations"] = object_locations
         return state
 
 

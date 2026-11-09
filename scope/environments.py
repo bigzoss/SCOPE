@@ -6,6 +6,7 @@ import math
 import requests
 from .contracts import ContractError, InfrastructureError
 from .interaction import ActionAdapter, Binding
+from .state_graph import SHOP_PREDICATES, shop_facts
 from .io import digest
 
 ACTION = re.compile(r"^\s*Action\s*:\s*(search|click|buy)\s*\[([^\]\n]+)\]\s*$",re.I|re.M)
@@ -29,6 +30,15 @@ def parse_action(text):
 
 class ShopActions(ActionAdapter):
     parse = staticmethod(parse_action)
+    state_predicates = SHOP_PREDICATES
+    public_facts = staticmethod(shop_facts)
+
+    def recovery_candidates(self, state, goal):
+        labels = state.get("clickables", [])
+        for label in sorted(labels, key=lambda value:(value not in goal, value)):
+            if label.casefold() not in {"buy now", "购买", "立即购买"}:
+                yield {"command": f"click[{label}]", "source_labels":[label],
+                       "reason":"inspect_public_option_or_other_candidate"}
 
     def observe(self, observation, previous, command, clickables):
         return {**super().observe(observation, previous, command, clickables),
@@ -41,6 +51,12 @@ class ShopActions(ActionAdapter):
         if command[6:-1].casefold() not in {item.casefold() for item in clickables}:
             return Binding("unobserved", "the button is absent from the current public page")
         return Binding("bound")
+
+    def confirmation_target(self, command, entity):
+        match = re.fullmatch(r"click\[(黑色|白色|红色|蓝色|灰色|绿色|银色|金色|透明)\]", command)
+        if match and entity.startswith("product:"):
+            return entity, "selected_color", match[1]
+        return None
 
     def evidence_entity(self, command, previous):
         value = command.split("[", 1)[1][:-1]

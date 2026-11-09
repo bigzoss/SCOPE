@@ -105,7 +105,7 @@ def test_new_benchmark_reuses_rollout_and_evaluation(tmp_path):
     summary = evaluate(policy, GridEnvironment(), Registry(), config, tmp_path)
     assert summary["success_count"] == 1
     assert summary["public_interaction"] == {"format_errors": 1, "binding_failures": 0,
-        "environment_invalid": 1, "legal_no_progress": 3, "public_state_loops": 1,
+        "environment_invalid": 1, "invalid_no_progress": 2, "legal_no_progress": 3, "public_state_loops": 1,
         "episode_termination_reasons": {"environment_done": 1}}
     row = read_jsonl(tmp_path / "results.jsonl")[0]
     actions = [e for e in row["history"] if e["phase"] == "execute"]

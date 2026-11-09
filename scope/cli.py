@@ -79,6 +79,14 @@ def main(argv=None):
     parser.add_argument("--split",choices=["rl_train","internal_dev","dev","test"],default="dev")
     parser.add_argument("--public-file")
     parser.add_argument("--examples")
+    parser.add_argument("--experience-output",help="Optional training-only experience JSONL for warmup-build")
+    parser.add_argument("--teacher-model", help="Local HF teacher checkpoint for offline warmup-build")
+    parser.add_argument("--teacher-api-config", type=Path, help="Local USTC credential config; never logged")
+    parser.add_argument("--warmup-role", choices=["manager", "actor"], default="manager")
+    parser.add_argument("--teacher-intervention", choices=["recovery", "all"], default="recovery")
+    parser.add_argument("--probe-output", type=Path, help="Export offline teacher probe hints from warmup-build")
+    parser.add_argument("--teacher-max-calls", type=int, default=24)
+    parser.add_argument("--teacher-device", choices=["cpu", "cuda"], default="cuda")
     parser.add_argument("--epochs",type=int,default=1)
     parser.add_argument("--batch-size",type=int,default=1)
     parser.add_argument("--left")
@@ -86,6 +94,20 @@ def main(argv=None):
     parser.add_argument("--allow-interaction-contrast",action="store_true",
                         help="For compare: allow only action_mode and loop_policy to differ")
     args=parser.parse_args(argv)
+    if args.experience_output and args.command!="warmup-build":parser.error("--experience-output requires warmup-build")
+    if args.teacher_model and args.teacher_api_config:
+        parser.error("Select one teacher backend")
+    if args.teacher_model and (args.command != "warmup-build" or args.split != "rl_train"):
+        parser.error("--teacher-model requires warmup-build --split rl_train")
+    if args.teacher_api_config and (args.command not in {"warmup-build", "collect"} or args.split != "rl_train"):
+        parser.error("--teacher-api-config requires warmup-build/collect --split rl_train")
+    if args.warmup_role != "manager" and args.command != "warmup":
+        parser.error("--warmup-role actor requires warmup")
+    if args.probe_output and (args.command != "warmup-build" or not (args.teacher_model or args.teacher_api_config)):
+        parser.error("--probe-output requires teacher-assisted warmup-build")
+    if args.probe_output and args.probe_output.exists():
+        parser.error("Probe output already exists")
+    if args.teacher_max_calls < 1:parser.error("--teacher-max-calls must be >= 1")
     if args.allow_interaction_contrast and args.command!="compare":parser.error("--allow-interaction-contrast requires compare")
     if args.resume and args.command not in {"train","warmup"}:parser.error("Only train/warmup accept --resume; evaluation resumes complete sequence caches automatically")
     if args.stop_after is not None and args.command not in {"train","warmup"}:parser.error("--stop-after requires train/warmup")
@@ -110,15 +132,50 @@ def main(argv=None):
             raise ContractError("ALFWorld public-v1 cannot support native local comparisons; select an explicit global-only recipe")
     else:registry=SplitRegistry(config["data_root"],config.get("split_seed",233))
     output=Path(args.output or "runs/"+args.command)
+    if args.command == "collect" and args.teacher_api_config and (output/"public.jsonl").exists():
+        raise ContractError("Teacher collection already has records; use a distinct output to avoid duplicate demonstrations")
     if args.command=="preflight":
         report={"split_sizes":{k:len(v) for k,v in registry.rows.items()},"source_files":source_hashes(),
                 "model_exists":Path(config["model"]["path"]).is_dir(),"gpu":config.get("gpu",2),
                 "split_guard":"passed","service_port":config["environment"]["base_url"]}
         print(canonical(report));return
     if args.command=="warmup-build":
-        from .warmup import build_examples
+        from .warmup import build_examples,graph_adapter
         if not args.public_file or not args.examples:parser.error("warmup-build requires --public-file and --examples")
-        print(canonical(build_examples(args.public_file,args.examples,registry.ids(args.split))));return
+        if args.experience_output and args.split != "rl_train":
+            raise ContractError("Experience extraction requires --split rl_train")
+        teacher = None
+        if args.teacher_model or args.teacher_api_config:
+            if not config["runtime"]["state_graph"]:
+                raise ContractError("Teacher distillation requires runtime.state_graph")
+            from .teacher import LocalTeacher,TeacherDistillation
+            if args.teacher_api_config:
+                from .teacher_api import APITeacher
+                backend = APITeacher(args.teacher_api_config, output / "teacher_cache", args.teacher_max_calls)
+            else:
+                backend = LocalTeacher(args.teacher_model, args.teacher_device)
+            teacher = TeacherDistillation(backend, args.teacher_max_calls)
+        try:
+            report = build_examples(args.public_file,args.examples,registry.ids(args.split),config,teacher)
+        finally:
+            if teacher and hasattr(teacher.generate, "close"):
+                teacher.generate.close()
+        if teacher:
+            report["teacher"]["api_usage"] = dict(getattr(teacher.generate, "counts", {}))
+            report["teacher"]["public_corpus_sha256"] = file_sha(args.public_file)
+            report["teacher"]["examples_sha256"] = file_sha(args.examples)
+        if args.probe_output:
+            from .io import atomic_jsonl
+            hints = [{"source":"teacher_public_probe", "task_id":r["task_id"], "phase":r["phase"],
+                      "prefix_hash":r["teacher_probe"]["prefix_hash"]} for r in read_jsonl(args.examples)
+                     if r.get("teacher_probe", {}).get("worthy")]
+            atomic_jsonl(args.probe_output, hints)
+            report["teacher_probes"] = {"count":len(hints), "sha256":file_sha(args.probe_output)}
+        if args.experience_output:
+            from .experience import build_experiences
+            report["experience"] = build_experiences(args.public_file,args.experience_output,
+                registry.ids("rl_train"),graph_adapter(kind))
+        print(canonical(report));return
     if args.command=="compare":
         from .evaluation import paired_comparison
         if not args.left or not args.right:parser.error("compare requires --left and --right")
@@ -153,6 +210,12 @@ def main(argv=None):
     if args.command in {"train","warmup","collect"} and not args.resume and ((output/"summary.json").exists() or (output/"checkpoints/latest.json").exists()):
         raise ContractError("Run already has results/checkpoints; use resume or a distinct output")
     extra={"split":args.split,"limit":args.limit,"epochs":args.epochs,"batch_size":args.batch_size}
+    extra["warmup_role"] = args.warmup_role
+    if args.teacher_api_config:
+        # Include identity, never credential path/content, in the reproducibility receipt.
+        teacher_cfg = json.loads(args.teacher_api_config.read_text(encoding="utf-8-sig"))
+        extra["teacher"] = {"provider":"USTC", "model":teacher_cfg.get("model", "qwen3.8-flash-next"),
+                            "request_budget":args.teacher_max_calls,"intervention":args.teacher_intervention}
     for field in ("checkpoint","actor_checkpoint","manager_checkpoint","examples","public_file"):
         value=getattr(args,field)
         if value:
@@ -172,7 +235,10 @@ def main(argv=None):
             from .warmup import warmup
             if not args.examples:parser.error("warmup requires --examples")
             optimizers={r:torch.optim.AdamW(policy.parameters(r),lr=config["training"].get("lr",1e-5),weight_decay=0.) for r in ("manager","actor")}
-            report=warmup(policy,args.examples,optimizers,output,digest(receipt),args.epochs,args.batch_size,registry.ids("rl_train"),args.resume,args.stop_after)
+            report=warmup(policy,args.examples,optimizers,output,digest(receipt),args.epochs,args.batch_size,
+                          registry.ids("rl_train"),args.resume,args.stop_after,
+                          graph_token_budget=(config["runtime"][args.warmup_role+"_max_input"], config["runtime"][args.warmup_role+"_max_new"]),
+                          memory_choice=config["runtime"]["memory_choice"],role=args.warmup_role)
             print(canonical(report));return
         experience=ExperienceBank(config.get("experience_bank"),registry.ids("rl_train"))
         with own_service(config,output,args.manage_service):
@@ -193,12 +259,38 @@ def main(argv=None):
                 elif args.command=="collect":
                     from .rollout import EpisodeRunner
                     tasks=registry.ids(args.split)[:args.limit or 10]
-                    runner=EpisodeRunner(policy,env,config["runtime"],args.split,experience)
-                    for index,task in enumerate(tasks):
-                        outcome=runner.run(task,f"collect{index}",greedy=True)
-                        evidence=[json.loads(r[1]) for r in outcome.final_atlas["tables"]["evidence"]]
-                        append_jsonl(output/"public.jsonl",{"task_id":task,"evidence":evidence})
-                    atomic_json(output/"summary.json",{"complete":True,"n":len(tasks),"public_only":True})
+                    backend, guide = None, None
+                    if args.teacher_api_config:
+                        from .teacher_api import APITeacher
+                        from .teacher_execution import ExecutionTeacher
+                        backend=APITeacher(args.teacher_api_config,output/"teacher_cache",args.teacher_max_calls)
+                        guide=ExecutionTeacher(backend,args.teacher_intervention)
+                    runner=EpisodeRunner(policy,env,config["runtime"],args.split,experience,actor_teacher=guide)
+                    demonstrations, successes = 0, 0
+                    try:
+                        for index,task in enumerate(tasks):
+                            outcome=runner.run(task,f"collect{index}",greedy=True)
+                            evidence=[json.loads(r[1]) for r in outcome.final_atlas["tables"]["evidence"]]
+                            append_jsonl(output/"public.jsonl",{"task_id":task,"evidence":evidence})
+                            successes += int(outcome.metrics["success"])
+                            if guide:
+                                append_jsonl(output/"teacher_rollouts.jsonl",{"task_id":task,"metrics":outcome.metrics,
+                                    "events":outcome.events,"costs":outcome.costs,"termination_reason":outcome.termination_reason})
+                                for event in outcome.events:
+                                    label=event.get("teacher_demonstration")
+                                    if label and event["action_status"] == "accepted" and outcome.metrics["success"] == 1:
+                                        append_jsonl(output/"actor_examples.jsonl",{"task_id":task,"phase":"execute",
+                                            "source":"teacher_actor_public_prefix","messages":event["student_messages"],
+                                            "completion":label["text"],"environment_accepted":True,"task_success":1,
+                                            "subgoal":label["subgoal"],"evidence_ids":label["evidence_ids"]})
+                                        demonstrations += 1
+                            atomic_json(output/"status.json",{"phase":"collecting","completed":index+1,"expected":len(tasks)})
+                        atomic_json(output/"summary.json",{"complete":True,"n":len(tasks),"public_only":True,
+                            "teacher_assisted":bool(guide),"success_count":successes,"actor_examples":demonstrations,
+                            "teacher_usage":dict(backend.counts) if backend else {},
+                            "student_performance_claim":False if guide else None})
+                    finally:
+                        if backend:backend.close()
             finally:env.close()
     except BaseException as exc:
         atomic_json(output/"error.json",{"type":type(exc).__name__,"error":str(exc),"traceback":traceback.format_exc()})

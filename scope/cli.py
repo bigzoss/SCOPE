@@ -85,7 +85,8 @@ def main(argv=None):
     parser.add_argument("--warmup-role", choices=["manager", "actor"], default="manager")
     parser.add_argument("--teacher-intervention", choices=["recovery", "all"], default="recovery")
     parser.add_argument("--probe-output", type=Path, help="Export offline teacher probe hints from warmup-build")
-    parser.add_argument("--teacher-max-calls", type=int, default=24)
+    parser.add_argument("--teacher-max-calls", type=int)
+    parser.add_argument("--teacher-eval", action="store_true", help="Evaluate with bounded USTC teacher recovery")
     parser.add_argument("--teacher-device", choices=["cpu", "cuda"], default="cuda")
     parser.add_argument("--epochs",type=int,default=1)
     parser.add_argument("--batch-size",type=int,default=1)
@@ -93,22 +94,29 @@ def main(argv=None):
     parser.add_argument("--right")
     parser.add_argument("--allow-interaction-contrast",action="store_true",
                         help="For compare: allow only action_mode and loop_policy to differ")
+    parser.add_argument("--allow-teacher-contrast", action="store_true",
+                        help="For compare: allow teacher assistance as the only evaluation contrast")
     args=parser.parse_args(argv)
     if args.experience_output and args.command!="warmup-build":parser.error("--experience-output requires warmup-build")
     if args.teacher_model and args.teacher_api_config:
         parser.error("Select one teacher backend")
     if args.teacher_model and (args.command != "warmup-build" or args.split != "rl_train"):
         parser.error("--teacher-model requires warmup-build --split rl_train")
-    if args.teacher_api_config and (args.command not in {"warmup-build", "collect"} or args.split != "rl_train"):
-        parser.error("--teacher-api-config requires warmup-build/collect --split rl_train")
+    if args.teacher_eval and (args.command != "evaluate" or args.split != "test" or not args.teacher_api_config
+                              or args.teacher_intervention != "recovery"):
+        parser.error("--teacher-eval requires evaluate --split test, --teacher-api-config and recovery intervention")
+    if args.teacher_api_config and not args.teacher_eval and (args.command not in {"warmup-build", "collect"} or args.split != "rl_train"):
+        parser.error("--teacher-api-config requires teacher evaluation or warmup-build/collect --split rl_train")
     if args.warmup_role != "manager" and args.command != "warmup":
         parser.error("--warmup-role actor requires warmup")
     if args.probe_output and (args.command != "warmup-build" or not (args.teacher_model or args.teacher_api_config)):
         parser.error("--probe-output requires teacher-assisted warmup-build")
     if args.probe_output and args.probe_output.exists():
         parser.error("Probe output already exists")
-    if args.teacher_max_calls < 1:parser.error("--teacher-max-calls must be >= 1")
+    if args.teacher_max_calls is not None and args.teacher_max_calls < 1:parser.error("--teacher-max-calls must be >= 1")
     if args.allow_interaction_contrast and args.command!="compare":parser.error("--allow-interaction-contrast requires compare")
+    if args.allow_teacher_contrast and (args.command != "compare" or args.allow_interaction_contrast):
+        parser.error("--allow-teacher-contrast requires compare without an interaction contrast")
     if args.resume and args.command not in {"train","warmup"}:parser.error("Only train/warmup accept --resume; evaluation resumes complete sequence caches automatically")
     if args.stop_after is not None and args.command not in {"train","warmup"}:parser.error("--stop-after requires train/warmup")
     if args.command in {"train","warmup"}:args.split="rl_train"
@@ -131,6 +139,14 @@ def main(argv=None):
         if args.command=="train" and config["training"]["method"]!="global":
             raise ContractError("ALFWorld public-v1 cannot support native local comparisons; select an explicit global-only recipe")
     else:registry=SplitRegistry(config["data_root"],config.get("split_seed",233))
+    if args.teacher_eval:
+        from .teacher_online import TEACHER
+        config["evaluation"]["teacher"] = TEACHER
+        if args.teacher_max_calls is None:
+            n = len(registry.ids("test"))
+            args.teacher_max_calls = min(n, args.limit or n) * TEACHER["max_proposals_per_task"] * 3
+    elif args.teacher_max_calls is None:
+        args.teacher_max_calls = 24
     output=Path(args.output or "runs/"+args.command)
     if args.command == "collect" and args.teacher_api_config and (output/"public.jsonl").exists():
         raise ContractError("Teacher collection already has records; use a distinct output to avoid duplicate demonstrations")
@@ -179,7 +195,8 @@ def main(argv=None):
     if args.command=="compare":
         from .evaluation import paired_comparison
         if not args.left or not args.right:parser.error("compare requires --left and --right")
-        report=paired_comparison(args.left,args.right,allow_interaction_contrast=args.allow_interaction_contrast)
+        report=paired_comparison(args.left,args.right,allow_interaction_contrast=args.allow_interaction_contrast,
+                                 allow_teacher_contrast=args.allow_teacher_contrast)
         atomic_json(output/"paired.json",report);print(canonical(report));return
     import random
     import numpy as np
@@ -211,7 +228,9 @@ def main(argv=None):
         raise ContractError("Run already has results/checkpoints; use resume or a distinct output")
     extra={"split":args.split,"limit":args.limit,"epochs":args.epochs,"batch_size":args.batch_size}
     extra["warmup_role"] = args.warmup_role
-    if args.teacher_api_config:
+    if args.teacher_eval:
+        extra["teacher"] = {**TEACHER, "request_budget": args.teacher_max_calls}
+    elif args.teacher_api_config:
         # Include identity, never credential path/content, in the reproducibility receipt.
         teacher_cfg = json.loads(args.teacher_api_config.read_text(encoding="utf-8-sig"))
         extra["teacher"] = {"provider":"USTC", "model":teacher_cfg.get("model", "qwen3.8-flash-next"),
@@ -254,7 +273,16 @@ def main(argv=None):
                     train(policy,env,registry,config,output,receipt,experience,args.resume,args.stop_after)
                 elif args.command=="evaluate":
                     from .evaluation import evaluate
-                    report=evaluate(policy,env,registry,config,output,args.split,experience,args.limit)
+                    if args.teacher_eval:
+                        from .teacher_online import OnlineRecovery
+                        teacher = OnlineRecovery(args.teacher_api_config, output / "teacher_cache", args.teacher_max_calls)
+                        try:
+                            report = evaluate(policy, env, registry, config, output, args.split, experience,
+                                              args.limit, actor_teacher=teacher)
+                        finally:
+                            teacher.close()
+                    else:
+                        report=evaluate(policy,env,registry,config,output,args.split,experience,args.limit)
                     print(canonical(report))
                 elif args.command=="collect":
                     from .rollout import EpisodeRunner

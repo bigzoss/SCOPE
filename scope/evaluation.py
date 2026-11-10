@@ -35,7 +35,7 @@ def _check_records(records,tasks,sequence_id):
         if m["success"] not in (0,1):raise ContractError("Success must be binary")
 
 
-def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit=None):
+def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit=None,actor_teacher=None):
     output=Path(output)
     sequences=registry.evaluation_sequences(split,config.get("evaluation",{}).get("sequence_length",2),
                                            config.get("evaluation",{}).get("seed",233))
@@ -50,7 +50,17 @@ def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit
     fixed_hash=policy.fingerprint()
     base_before=policy.frozen_base_signature() if hasattr(policy,"frozen_base_signature") else None
     contract=evaluation_contract(config,split,sequences)
-    runner=EpisodeRunner(policy,env,config["runtime"],split,experience)
+    declared_teacher = config.get("evaluation", {}).get("teacher")
+    if actor_teacher is not None:
+        if declared_teacher != actor_teacher.identity:
+            raise ContractError("Teacher-assisted evaluation identity mismatch")
+        contract["teacher_assistance"] = declared_teacher
+        runner = EpisodeRunner(policy, env, config["runtime"], split, experience,
+                               actor_teacher=actor_teacher, teacher_evaluation=True)
+    elif declared_teacher is not None:
+        raise ContractError("Teacher-assisted evaluation declared without a teacher")
+    else:
+        runner = EpisodeRunner(policy, env, config["runtime"], split, experience)
     records=[];sequence_ids=[]
     for index,tasks in enumerate(sequences):
         path=output/"sequences"/f"sequence_{index:05d}.json"
@@ -64,6 +74,8 @@ def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit
         else:
             unit=[]
             for task in tasks:
+                if actor_teacher is not None:
+                    actor_teacher.begin_task()
                 outcome=runner.run(task,f"eval:{index}:{task}",greedy=True)
                 actor=[s for s in outcome.samples if s.role=="actor"]
                 steps=[e for e in outcome.events if e["phase"]=="execute"]
@@ -76,7 +88,8 @@ def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit
                     "public_evidence":[json.loads(r[1]) for r in outcome.final_atlas["tables"]["evidence"]],
                     "manager_operations":[e for e in outcome.events if e["phase"]!="execute"],
                     "initial_memory":"empty_task_facts_plus_frozen_training_experience",
-                    "final_atlas_hash":digest(outcome.final_atlas)})
+                    "final_atlas_hash":digest(outcome.final_atlas),
+                    **({"teacher_usage": actor_teacher.task_usage()} if actor_teacher is not None else {})})
             _check_records(unit,tasks,index)
             atomic_json(path,{"tasks":tasks,"parameter_hash":fixed_hash,"records":unit,
                             "records_sha256":digest(unit),"contract_sha256":digest(contract)})
@@ -112,17 +125,30 @@ def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit
                  "turns_citing_retrieved_evidence":sum(bool(set(e.get("retrieved_evidence_in_view", [])) &
                                                             set(e.get("cited_evidence_ids", []))) for e in steps)},
              "mean_total_tokens":sum(r["costs"]["charged_tokens"] for r in records)/max(1,n),
+             "adapter_fingerprint":fixed_hash,
              "parameters_unchanged_during_eval":True,"memory_unchanged":True,
              "frozen_base_parameters_unchanged":True if base_before is not None else None,"evaluation_contract":contract,
              "results_sha256":file_sha(result),"task_ids_sha256":digest(sorted(ids))}
     summary["decision_recovery"] = recovery_diagnostics([e for r in records for e in r["history"] if e["phase"] == "execute"] +
                                                       [e for r in records for e in r["manager_operations"]])
+    if actor_teacher is not None:
+        usage = Counter()
+        for record in records:
+            task_usage = record["teacher_usage"]
+            usage.update(task_usage)
+            actions = [e for e in record["history"] if e.get("teacher_demonstration")]
+            usage["tasks_with_proposals"] += int(task_usage.get("proposals", 0) > 0)
+            usage["tasks_with_teacher_action"] += int(bool(actions))
+            usage["teacher_actions"] += len(actions)
+            usage["accepted_teacher_actions"] += sum(e["action_status"] == "accepted" for e in actions)
+        summary["teacher_usage"] = dict(usage)
     atomic_json(output/"summary.json",summary)
     atomic_json(output/"status.json",{"phase":"complete","completed":n,"expected":n})
     return summary
 
 
-def paired_comparison(left,right,repeats=20000,seed=233,allow_interaction_contrast=False):
+def paired_comparison(left,right,repeats=20000,seed=233,allow_interaction_contrast=False,
+                      allow_teacher_contrast=False):
     if repeats<1:raise ContractError("Bootstrap repeats must be positive")
     def read(path):
         path=Path(path);summary=json.loads((path/"summary.json").read_text())
@@ -140,9 +166,25 @@ def paired_comparison(left,right,repeats=20000,seed=233,allow_interaction_contra
                       "generation_budget":{k:old["config"]["runtime"].get(k) for k in _BUDGET_FIELDS},
                       "benchmark":old["config"]["environment"].get("kind","shopsim")}
         if contract is None:raise ContractError("Evaluation protocol identity is missing")
-        return {r["task_id"]:r for r in rows},contract
-    a,ac=read(left);b,bc=read(right)
+        return {r["task_id"]:r for r in rows},contract,summary
+    a,ac,asummary=read(left);b,bc,bsummary=read(right)
     contrast = None
+    teacher_contrast = None
+    if allow_teacher_contrast:
+        ac, bc = dict(ac), dict(bc)
+        left_teacher, right_teacher = ac.pop("teacher_assistance", None), bc.pop("teacher_assistance", None)
+        if (left_teacher is None) == (right_teacher is None) or ac != bc:
+            raise ContractError("Teacher contrast requires one assisted condition and otherwise identical protocols")
+        if not asummary.get("adapter_fingerprint") or asummary["adapter_fingerprint"] != bsummary.get("adapter_fingerprint"):
+            raise ContractError("Teacher contrast requires matching student adapters")
+        left_receipt = json.loads((Path(left) / "receipt.json").read_text())
+        right_receipt = json.loads((Path(right) / "receipt.json").read_text())
+        if (left_receipt["model"]["sha256"] != right_receipt["model"]["sha256"]
+                or left_receipt["environment_manifest_sha256"] != right_receipt["environment_manifest_sha256"]
+                or left_receipt.get("experience_bank_sha256") != right_receipt.get("experience_bank_sha256")
+                or left_receipt["config"]["runtime"] != right_receipt["config"]["runtime"]):
+            raise ContractError("Teacher contrast requires matching base model, environment, memory and runtime")
+        teacher_contrast = {"left": left_teacher, "right": right_teacher}
     if ac != bc:
         left_interaction, right_interaction = ac.get("public_interaction", {}), bc.get("public_interaction", {})
         modes = {"action_mode", "loop_policy"}
@@ -169,4 +211,6 @@ def paired_comparison(left,right,repeats=20000,seed=233,allow_interaction_contra
             "interpretation":"task-sequence uncertainty; training-seed variation must be reported separately"}
     if contrast:
         result["interaction_contrast"] = contrast
+    if teacher_contrast:
+        result["teacher_contrast"] = teacher_contrast
     return result

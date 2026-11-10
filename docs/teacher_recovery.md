@@ -90,6 +90,24 @@ python -m scope.cli warmup --config configs/alfworld_teacher_recovery.json \
 
 任务必须来自当前训练分区。离线选点不调用教师，不强制执行教师候选；训练日志保存 `probe_selection`，并报告 `all_branches_failed`、正负效用候选数、严格成功差和实际续跑成本。先固定执行器训练管理器，再启用已有交替训练；每次比较期间策略版本固定。
 
+## 在线教师评估
+
+使用相同的配置、checkpoint 和测试划分，分别运行学生独立组和教师辅助组。辅助组每个任务最多调用两次教师提议，触发条件为动作被拒、重复停滞或公开状态冲突。每条提议沿用同一动作预算并校验公开证据引用。无效教师响应会交回学生处理。传输错误或响应模型不匹配会暂停评估，重跑同一命令可从已校验的任务缓存恢复。
+
+```bash
+python -m scope.cli evaluate --split test --config "$EVAL_CONFIG" \
+  --actor-checkpoint "$ACTOR" --manager-checkpoint "$MANAGER" --output runs/student_eval
+
+python -m scope.cli evaluate --split test --config "$EVAL_CONFIG" \
+  --actor-checkpoint "$ACTOR" --manager-checkpoint "$MANAGER" --output runs/assisted_eval \
+  --teacher-eval --teacher-api-config "$USTC_CONFIG"
+
+python -m scope.cli compare --config "$EVAL_CONFIG" --allow-teacher-contrast \
+  --left runs/student_eval --right runs/assisted_eval --output runs/teacher_comparison
+```
+
+评估汇总分别记录学生执行预算与教师请求、缓存命中和 token 开销。两组评估的服务使用同一环境配置。ShopSimulator 可在两个评估命令中加 `--manage-service`，ALFWorld 使用外部服务。
+
 ## 验证与限制
 
 - 全量 CPU 测试覆盖已有模块以及新增循环、证据位置、教师越权引用、缓存、训练分区、预热隔离与恢复等行为。

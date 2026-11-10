@@ -179,6 +179,46 @@ def test_teacher_samples_cannot_receive_grpo_updates():
         policy.grpo_update([(sample,1.)],"manager",torch.optim.AdamW(policy.parameters("manager")))
 
 
+def test_online_teacher_falls_back_on_invalid_completion_and_resumes_from_cache(tmp_path, monkeypatch):
+    from scope.teacher_online import OnlineRecovery
+
+    config = tmp_path / "provider.json"
+    config.write_text(json.dumps({"base_url": "https://api.llm.ustc.edu.cn/v1",
+                                  "api_key": "test-secret", "model": "different-default"}))
+    teacher = OnlineRecovery(config, tmp_path / "cache", max_requests=4)
+    calls = []
+
+    def post(*args, **kwargs):
+        calls.append(kwargs["json"]["model"])
+        return SimpleNamespace(status_code=200, json=lambda: {
+            "model": teacher.identity["model"],
+            "choices": [{"finish_reason": "stop", "message": {"content": "invalid JSON"}}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2},
+        })
+
+    monkeypatch.setattr(teacher.api.http, "post", post)
+    messages = [{"role": "user", "content": "obs_000001_abc: You see desk 1."}]
+    adapter = ALFWorldActions()
+    state = adapter.observe("You see desk 1.", {}, None, [])
+    warning = {"warning": "previous command was rejected"}
+    assert not teacher.should_intervene({})
+    for _ in range(2):
+        assert teacher.should_intervene(warning)
+        assert teacher.propose(messages, state, adapter) is None
+    assert not teacher.should_intervene(warning)
+    assert calls == ["qwen3.8-flash-next"]
+    usage = teacher.task_usage()
+    assert usage["rejected_proposals"] == 2 and usage["cache_hits"] == 1
+    assert usage["logical_prompt_tokens"] == 20 and usage["prompt_tokens"] == 10
+    teacher.begin_task()
+    assert teacher.should_intervene(warning)
+    monkeypatch.setattr(teacher.api.http, "post", lambda *a, **kw: SimpleNamespace(
+        status_code=200, json=lambda: {"model": "wrong-model", "choices": []}))
+    with pytest.raises(InfrastructureError, match="response envelope"):
+        teacher.propose([*messages, {"role": "user", "content": "new prompt"}], state, adapter)
+    teacher.close()
+
+
 def test_actor_warmup_updates_only_actor_and_resumes(tmp_path):
     import torch
     from test_policy import tiny_policy

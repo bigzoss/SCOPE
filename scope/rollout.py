@@ -90,12 +90,16 @@ def manager_messages(atlas, observation, working, goal, phase, budget):
 
 
 class EpisodeRunner:
-    def __init__(self,policy,env,config,split="train",experience=None,actor_teacher=None,probe_selector=None):
+    def __init__(self,policy,env,config,split="train",experience=None,actor_teacher=None,probe_selector=None,
+                 teacher_evaluation=False):
         self.policy,self.env,self.cfg,self.split=policy,env,config,split
         self.experience=experience
-        if actor_teacher and split not in {"train", "rl_train"}:
+        if teacher_evaluation and (actor_teacher is None or split != "test"):
+            raise ContractError("Teacher-assisted evaluation requires an explicit test condition")
+        if actor_teacher and split not in {"train", "rl_train"} and not teacher_evaluation:
             raise ContractError("Teacher demonstrations require a training partition")
         self.actor_teacher = actor_teacher
+        self.teacher_evaluation = teacher_evaluation
         self.probe_selector = probe_selector
         self.action_adapter = getattr(env, "action_adapter", None)
         if self.action_adapter is None and config.get("action_mode", "legacy") != "legacy":
@@ -351,9 +355,14 @@ class EpisodeRunner:
                 teacher_label = None
                 if self.actor_teacher and (not hasattr(self.actor_teacher,"should_intervene") or self.actor_teacher.should_intervene(working)):
                     teacher_label = self.actor_teacher.propose(messages, working["public_state"], self.action_adapter)
+                if teacher_label is not None:
                     tokens = self.policy.tokenizer.encode(teacher_label["text"], add_special_tokens=False)
                     if len(tokens) > room:
-                        raise ContractError("Teacher action exceeds the student's generation budget")
+                        if not self.teacher_evaluation:
+                            raise ContractError("Teacher action exceeds the student's generation budget")
+                        self.actor_teacher.record_rejection("actor_token_budget")
+                        teacher_label = None
+                if teacher_label is not None:
                     sample = Sample("actor", "execute", self.policy.encode(messages), tokens, [], teacher_label["text"],
                                     self.policy.versions["actor"], digest([atlas.fingerprint(),view_hash]), origin="teacher")
                 else:
@@ -456,7 +465,8 @@ class EpisodeRunner:
                         "evidence_ids": cycle["evidence_ids"] if cycle else [before_id]} if working["warning"] else None)
                 history.append({"response":sample.text,"observation":observation,"command":command,"is_error":public["is_error"]})
                 events.append({"phase":"execute","view_hash":view_hash,"view_id":view_id,"command":command,
-                               **({"teacher_demonstration":teacher_label,"student_messages":messages} if teacher_label else {}),
+                               **({"teacher_demonstration": teacher_label} if teacher_label else {}),
+                               **({"student_messages": messages} if teacher_label and not self.teacher_evaluation else {}),
                                "context_evidence_ids":sorted(context_ids),
                                "required_evidence_ids":sorted(required_ids),
                                "retrieved_evidence_in_view":sorted(context_ids & set(working.get("selected_ids", []))),

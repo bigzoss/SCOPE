@@ -1,4 +1,4 @@
-"""Bounded USTC teacher transport for offline public-prefix supervision.
+"""Bounded USTC teacher transport for public-prefix supervision and evaluation.
 
 The config is read locally. Credentials and HTTP response bodies never enter logs.
 Cached responses are proposals only; callers must run the normal tool validator.
@@ -16,7 +16,7 @@ from .io import atomic_json, canonical, digest
 
 
 class APITeacher:
-    def __init__(self, config_path, cache, max_requests=24):
+    def __init__(self, config_path, cache, max_requests=24, *, model=None, allow_unusable=False):
         config = json.loads(Path(config_path).read_text(encoding="utf-8-sig"))
         url = urlsplit(config["base_url"])
         if (url.scheme, url.hostname, url.path.rstrip("/")) != ("https", "api.llm.ustc.edu.cn", "/v1") or (
@@ -24,7 +24,8 @@ class APITeacher:
             raise ContractError("Teacher endpoint must be the USTC HTTPS service")
         if type(max_requests) is not int or max_requests < 1:
             raise ContractError("Teacher request budget must be positive")
-        self.model = config.get("model", "qwen3.8-flash-next")
+        self.model = model or config.get("model", "qwen3.8-flash-next")
+        self.allow_unusable = allow_unusable
         self.identity = {"provider":"USTC", "model":self.model, "protocol":"public-prefix-json-v1"}
         self.url = config["base_url"].rstrip("/") + "/chat/completions"
         self.http = requests.Session()
@@ -33,6 +34,30 @@ class APITeacher:
 
     def close(self):
         self.http.close()
+
+    def _completion(self, response):
+        try:
+            result = response.json()
+            if result["model"] != self.model:
+                raise ValueError("Teacher response model mismatch")
+            choice = result["choices"][0]
+            reason = choice["finish_reason"]
+            if reason not in ("stop", "length", "content_filter"):
+                raise ValueError("Unknown teacher completion status")
+            if reason == "stop":
+                text = choice["message"]["content"]
+                try:
+                    if isinstance(text, str) and isinstance(json.loads(text), dict):
+                        return text, result.get("usage") or {}
+                except ValueError:
+                    pass
+                reason = "invalid_json"
+        except (ValueError, KeyError, TypeError, IndexError):
+            raise InfrastructureError("Teacher API returned an invalid response envelope") from None
+        if not self.allow_unusable:
+            raise InfrastructureError("Teacher API returned an invalid structured completion")
+        self.counts["unusable_" + reason] += 1
+        return canonical({"teacher_response_rejected": reason}), result.get("usage") or {}
 
     def __call__(self, messages):
         body = {"model":self.model, "messages":messages, "temperature":0, "max_tokens":768,
@@ -44,6 +69,8 @@ class APITeacher:
             if row.get("request_hash") != key or row.get("response_hash") != digest(row.get("text")):
                 raise ContractError("Teacher cache identity mismatch")
             self.counts["cache_hits"] += 1
+            for field in ("prompt_tokens", "completion_tokens"):
+                self.counts["logical_" + field] += int((row.get("usage") or {}).get(field, 0) or 0)
             return row["text"]
         for attempt in range(3):
             if self.counts["requests"] >= self.limit:
@@ -63,18 +90,10 @@ class APITeacher:
                     continue
             if response.status_code != 200:
                 raise InfrastructureError(f"Teacher API HTTP {response.status_code}")
-            try:
-                result = response.json()
-                if result["model"] != self.model or result["choices"][0]["finish_reason"] != "stop":
-                    raise ValueError("Model mismatch or truncated completion")
-                text = result["choices"][0]["message"]["content"]
-                if not isinstance(text, str) or not isinstance(json.loads(text), dict):
-                    raise ValueError("Expected a JSON object")
-            except (ValueError, KeyError, TypeError, IndexError):
-                raise InfrastructureError("Teacher API returned an invalid structured completion") from None
-            usage = result.get("usage") or {}
+            text, usage = self._completion(response)
             for field in ("prompt_tokens", "completion_tokens"):
                 self.counts[field] += int(usage.get(field, 0) or 0)
+                self.counts["logical_" + field] += int(usage.get(field, 0) or 0)
             atomic_json(path, {"request_hash":key, "response_hash":digest(text), "text":text,
                                "identity":self.identity, "usage":usage})
             return text

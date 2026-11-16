@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-from .contracts import ContractError, InfrastructureError
+from .contracts import ContractError, InfrastructureError, TeacherBudgetExhausted
 from .io import atomic_json, canonical, digest
 
 
@@ -74,7 +74,7 @@ class APITeacher:
             return row["text"]
         for attempt in range(3):
             if self.counts["requests"] >= self.limit:
-                raise InfrastructureError("Teacher API request budget exhausted")
+                raise TeacherBudgetExhausted("Teacher API request budget exhausted")
             self.counts["requests"] += 1
             try:
                 response = self.http.post(self.url, json=body, timeout=(15, 50), allow_redirects=False)

@@ -160,7 +160,7 @@ class HFPolicy:
         import torch
         usable = [(s,float(w)) for s,w in weighted_samples if s.role == role and s.completion_ids and abs(w)>0]
         optimizer.zero_grad(set_to_none=True)
-        losses, kls = [], []
+        losses, kls, policy_losses, kl_losses = [], [], [], []
         for sample, weight in usable:
             if sample.origin != "policy":
                 raise ContractError("Teacher demonstrations cannot enter on-policy GRPO")
@@ -177,11 +177,14 @@ class HFPolicy:
             objective = torch.minimum(ratio*advantage, ratio.clamp(1-clip,1+clip)*advantage)
             delta = (ref-current).clamp(-20,20)
             kl = delta.exp()-delta-1
+            policy_loss = -objective.mean()*weight
+            kl_loss = beta*kl.mean()*weight
             loss = (-objective.mean()+beta*kl.mean())*weight
             if not torch.isfinite(loss):
                 raise FloatingPointError("Non-finite GRPO loss")
             loss.backward()
             losses.append(float(loss.detach())); kls.append(float(kl.detach().mean()))
+            policy_losses.append(float(policy_loss.detach())); kl_losses.append(float(kl_loss.detach()))
         params = self.parameters(role)
         norm = float(torch.nn.utils.clip_grad_norm_(params,max_norm)) if usable else 0.
         if not math.isfinite(norm):raise FloatingPointError("Non-finite policy gradient norm")
@@ -192,6 +195,7 @@ class HFPolicy:
             self.versions[role] += 1
         optimizer.zero_grad(set_to_none=True)
         return {"loss":sum(losses), "kl":sum(kls)/max(1,len(kls)), "grad_norm":norm,
+                "policy_loss":sum(policy_losses), "kl_loss":sum(kl_losses),
                 "trained_actions":len(usable), "optimizer_step":bool(usable)}
 
     def sft_update(self, samples, optimizer, role="manager", max_norm=1.):

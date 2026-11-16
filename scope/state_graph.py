@@ -21,10 +21,12 @@ class PublicFact:
 
 
 _ALF_OBJECT = r"[a-z][a-z0-9_]* \d+"
+ALF_PLACEMENT_RECEIPT = (rf"\byou (?:move (?:the )?({_ALF_OBJECT}) to|"
+                         rf"put (?:the )?({_ALF_OBJECT}) (?:in/on|in|on|into)) (?:the )?({_ALF_OBJECT})\b")
 _ALF_RULES = tuple(re.compile(pattern, re.I) for pattern in (
     rf"\byou (?:arrive at|are facing) (?:the )?({_ALF_OBJECT})\b",
     rf"\byou (?:pick up|take) (?:the )?({_ALF_OBJECT}) from (?:the )?({_ALF_OBJECT})\b",
-    rf"\byou put (?:the )?({_ALF_OBJECT}) (?:in/on|in|on|into) (?:the )?({_ALF_OBJECT})\b",
+    ALF_PLACEMENT_RECEIPT,
     rf"\byou (open|close) (?:the )?({_ALF_OBJECT})\b",
     rf"\b({_ALF_OBJECT}) is (open|closed)\b",
     rf"\byou (clean|heat|cool) (?:the )?({_ALF_OBJECT})\b",
@@ -48,7 +50,7 @@ def alfworld_facts(record):
         yield PublicFact("alf:" + match[1].lower(), "object_location", "alf:" + match[2].lower(), *match.span())
     for index, pattern in enumerate(_ALF_RULES):
         for match in pattern.finditer(text):
-            first = match[1].lower()
+            first = next(group.lower() for group in match.groups() if group is not None)
             def fact(entity, predicate, value):
                 return PublicFact(entity, predicate, value, *match.span())
             if index == 0:
@@ -56,7 +58,7 @@ def alfworld_facts(record):
             elif index in (1, 2):
                 taken = index == 1
                 yield fact("alf:" + first, "held", taken)
-                yield fact("alf:" + first, "object_location", "agent" if taken else "alf:" + match[2].lower())
+                yield fact("alf:" + first, "object_location", "agent" if taken else "alf:" + match.groups()[-1].lower())
             elif index == 3:
                 yield fact("alf:" + match[2].lower(), "container_open", first == "open")
             elif index == 4:
@@ -70,10 +72,21 @@ def alfworld_facts(record):
 
 
 def shop_facts(record):
+    from .shop_purchase import exact_color, read_panel
     from .validation import public_prices
 
     entity, text = record["entity"], record["text"]
     if not entity.startswith("product:"):
+        return
+    panel, span = read_panel(text)
+    if panel and entity == "product:" + panel["product_id"] and "buy now" in {c.casefold() for c in record["clickables"]}:
+        yield PublicFact("task", "current_candidate", entity, *span.span(1))
+        if panel["displayed_price_cny"] is not None:
+            yield PublicFact(entity, "price", panel["displayed_price_cny"], *span.span(1))
+        for field, value in (panel["selected"] or {}).items():
+            color = exact_color(field, value)
+            yield PublicFact(entity, "selected_color" if color else "selected_spec",
+                             value if color else field + ":" + value, *span.span(1))
         return
     marker = re.search(r"\bBuy Now\b", text, re.I)
     if marker and any(label.casefold() == "buy now" for label in record.get("clickables", [])):
@@ -99,6 +112,9 @@ def apply_observation(tools, atlas, working, record, budget, goal):
     facts = tools.validator.public_facts(record)
     state = working.get("public_state", {})
     adapter = tools.validator.adapter
+    if working.get("decision_evidence") and getattr(adapter, "independent_decision_slots", False):
+        working["domain_decision_slots"] = True
+        working["decision_targets"] = list(adapter.decision_targets(state, goal))[:8]
     working["focus_entities"] = sorted({f.entity for f in facts} | set(adapter.focus_entities(state) if adapter else ()))
     for fact in facts:
         tools.execute(atlas, working, fact.proposal(record, atlas.revision), "state", budget, goal)
@@ -165,6 +181,10 @@ def compression_due(atlas, working):
 
 
 def management_reason(atlas, working, goal, phase):
+    if working.get("domain_decision_slots") and phase == "state":
+        from .decision_evidence import proposals
+        if next(proposals(atlas, working, goal), None) is not None:
+            return "historical_decision_evidence"
     if working.get("decision_recovery") and phase == "state" and working.get("decision_targets"):
         from .decision_evidence import review
         if any(r["status"] != "supported" for r in review(atlas, working, goal)):

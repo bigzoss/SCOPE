@@ -8,6 +8,7 @@ from .contracts import ContractError, InfrastructureError
 from .interaction import ActionAdapter, Binding
 from .state_graph import SHOP_PREDICATES, shop_facts
 from .io import digest
+from .shop_purchase import purchase_conflict, read_panel, review_purchase
 
 ACTION = re.compile(r"^\s*Action\s*:\s*(search|click|buy)\s*\[([^\]\n]+)\]\s*$",re.I|re.M)
 RAW_ACTION = re.compile(r"\s*(search|click|buy)\s*\[([^\]\n]+)\]\s*",re.I)
@@ -67,9 +68,31 @@ class ShopActions(ActionAdapter):
         return previous
 
 
+class ShopPurchaseActions(ShopActions):
+    def observe(self, observation, previous, command, clickables):
+        panel, _ = read_panel(observation)
+        return {**super().observe(observation, previous, command, clickables), "purchase_panel": panel}
+
+    def observation_entity(self, observation, previous):
+        panel, _ = read_panel(observation)
+        if panel:
+            return "product:" + panel["product_id"]
+        if re.search(r"\[SEP\]\s*Page \d+ \(Total results:", observation):
+            return "task"
+        return previous
+
+    def preflight(self, command, state, goal):
+        if command == "click[Buy Now]":
+            return purchase_conflict(review_purchase(goal, state.get("purchase_panel")))
+        return None
+
+
 class ShopEnvironment:
     action_adapter = ShopActions()
-    def __init__(self, base_url, allowed_tasks, manifest_sha=None, timeout=120):
+    def __init__(self, base_url, allowed_tasks, manifest_sha=None, timeout=120, *, purchase_flow=False):
+        self.purchase_flow = purchase_flow
+        if purchase_flow:
+            self.action_adapter = ShopPurchaseActions()
         self.base_url = base_url.rstrip("/")
         self.allowed = set(map(str,allowed_tasks))
         self.manifest_sha = manifest_sha
@@ -98,6 +121,8 @@ class ShopEnvironment:
             raise InfrastructureError("Service is not ready or its manifest changed")
         if self.manifest_sha and data.get("manifest_sha256") != self.manifest_sha:
             raise ContractError("Environment manifest hash mismatch")
+        if self.purchase_flow and data.get("purchase_panel") != "public_buy_form_v1":
+            raise ContractError("Purchase flow requires the public buy-form projection on the service")
         return data
 
     def reset(self, task):

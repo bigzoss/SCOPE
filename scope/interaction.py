@@ -38,8 +38,16 @@ class ActionAdapter:
     def normalize(self, command):
         return command
 
+    def transport_command(self, command):
+        """Canonicalize wire syntax even when optional normalization is disabled."""
+        return command
+
     def bind(self, command, state):
         return Binding()
+
+    def preflight(self, command, state, goal):
+        """Return a reason to withhold a command with contradicted public prerequisites."""
+        return None
 
     def observe(self, observation, previous, command, clickables):
         return {"page": digest(" ".join(observation.split()))}
@@ -71,11 +79,14 @@ class ActionAdapter:
         """Bound action suggestions supported by public observations; not an oracle policy."""
         return ()
 
+    def observation_entity(self, observation, previous):
+        return previous
+
     def evidence_entity(self, command, previous):
         return previous
 
 
-def execute_action(env, adapter, response, observation, state, mode, blocked_commands=()):
+def execute_action(env, adapter, response, observation, state, mode, blocked_commands=(), *, goal=None):
     raw = action_text(response)
     binding = Binding()
     if adapter is None:
@@ -88,6 +99,8 @@ def execute_action(env, adapter, response, observation, state, mode, blocked_com
         command = adapter.parse(response)
         if command is not None and mode != "legacy":
             command = adapter.normalize(command)
+        if command:
+            command = adapter.transport_command(command)
         if command and mode == "grounded":
             binding = adapter.bind(command, state)
         status = "accepted" if command else "format_error"
@@ -98,6 +111,17 @@ def execute_action(env, adapter, response, observation, state, mode, blocked_com
         if status == "accepted" and command in blocked_commands:
             status = "no_progress_blocked"
             binding = Binding("repeated_no_progress", "this command already made no progress twice in the same public state")
+        if status == "accepted" and goal is not None:
+            reason = adapter.preflight(command, state, goal)
+            if reason:
+                status = "precondition_conflict"
+                binding = Binding("public_precondition_conflict", reason)
+        guard = getattr(env, "public_command_guard", None)
+        if status == "accepted" and guard is not None:
+            reason = guard(command)
+            if reason:
+                status = "precondition_conflict"
+                binding = Binding("precondition_conflict", reason)
         sent = status == "accepted"
         if sent:
             next_observation, done, public = env.step_command(command)

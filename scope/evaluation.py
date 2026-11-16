@@ -8,7 +8,7 @@ import numpy as np
 from .contracts import ContractError
 from .io import atomic_json,atomic_jsonl,append_jsonl,canonical,digest,file_sha,read_jsonl
 from .rollout import EpisodeRunner
-from .config import DEFAULT_RUNTIME
+from .config import DEFAULT_RUNTIME, evaluation_runtime
 from .interaction import TRACE_VERSION
 from .recovery import recovery_diagnostics
 
@@ -17,12 +17,16 @@ _BUDGET_FIELDS=("max_turns","actor_max_input","actor_max_new","manager_max_input
 
 
 def evaluation_contract(config,split,sequences):
+    runtime = evaluation_runtime(config)
+    budget = {k:runtime.get(k,DEFAULT_RUNTIME[k]) for k in _BUDGET_FIELDS}
+    if "max_environment_steps" in runtime:
+        budget["max_environment_steps"] = runtime["max_environment_steps"]
     return {"split":split,"sequences_sha256":digest(sequences),"information_protocol":"full_instruction",
             "benchmark":config.get("environment",{}).get("kind","shopsim"),
             "public_interaction":{"trace_version":TRACE_VERSION, **{
                 k:config["runtime"].get(k,DEFAULT_RUNTIME[k]) for k in ("action_mode","loop_policy","state_graph","memory_choice","compression_after","compression_min_chars","compact_actor_view","actor_history_turns")},
-                **{k:config["runtime"][k] for k in ("shared_memory","disabled_memory_tools","decision_evidence","decision_recovery") if config["runtime"].get(k)}},
-            "generation_budget":{k:config["runtime"].get(k,DEFAULT_RUNTIME[k]) for k in _BUDGET_FIELDS}}
+                **{k:config["runtime"][k] for k in ("shared_memory","disabled_memory_tools","decision_evidence","decision_recovery","shop_purchase_flow") if config["runtime"].get(k)}},
+            "generation_budget":budget}
 
 
 def _check_records(records,tasks,sequence_id):
@@ -50,17 +54,18 @@ def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit
     fixed_hash=policy.fingerprint()
     base_before=policy.frozen_base_signature() if hasattr(policy,"frozen_base_signature") else None
     contract=evaluation_contract(config,split,sequences)
+    runtime = evaluation_runtime(config)
     declared_teacher = config.get("evaluation", {}).get("teacher")
     if actor_teacher is not None:
         if declared_teacher != actor_teacher.identity:
             raise ContractError("Teacher-assisted evaluation identity mismatch")
         contract["teacher_assistance"] = declared_teacher
-        runner = EpisodeRunner(policy, env, config["runtime"], split, experience,
+        runner = EpisodeRunner(policy, env, runtime, split, experience,
                                actor_teacher=actor_teacher, teacher_evaluation=True)
     elif declared_teacher is not None:
         raise ContractError("Teacher-assisted evaluation declared without a teacher")
     else:
-        runner = EpisodeRunner(policy, env, config["runtime"], split, experience)
+        runner = EpisodeRunner(policy, env, runtime, split, experience)
     records=[];sequence_ids=[]
     for index,tasks in enumerate(sequences):
         path=output/"sequences"/f"sequence_{index:05d}.json"
@@ -80,8 +85,10 @@ def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit
                 actor=[s for s in outcome.samples if s.role=="actor"]
                 steps=[e for e in outcome.events if e["phase"]=="execute"]
                 unit.append({"task_id":task,"sequence_id":index,"metrics":outcome.metrics,"costs":outcome.costs,
+                    **({"environment_steps":sum(e["sent"] is True for e in steps)}
+                       if "max_environment_steps" in runtime else {}),
                     "actor_turns":len(actor),"length_terminations":sum(s.termination=="length" for s in actor),
-                    "illegal_actions":sum(bool(e["is_error"]) and e["action_status"] != "no_progress_blocked" for e in steps),
+                    "illegal_actions":sum(bool(e["is_error"]) and e["action_status"] not in {"no_progress_blocked", "precondition_conflict"} for e in steps),
                     "termination_reason":outcome.termination_reason,
                     "history":[e if e["phase"]=="execute" else {"phase":e["phase"],"command":None,
                                "is_error":None,"view_hash":None} for e in outcome.events],
@@ -112,11 +119,13 @@ def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit
              "strict_success_rate":sum(r["metrics"]["success"] for r in records)/max(1,n),
              "mean_loose_reward":sum(r["metrics"]["r_loose"] for r in records)/max(1,n),
              "mean_strict_reward":sum(r["metrics"]["r_strict"] for r in records)/max(1,n),
+             "purchase_count":sum(int(r["metrics"]["purchased"]) for r in records),
              "wrong_purchase_rate":sum(r["metrics"]["purchased"] and not r["metrics"]["success"] for r in records)/max(1,n),
              "illegal_action_rate_per_turn":sum(r["illegal_actions"] for r in records)/max(1,turns),
              "length_termination_rate_per_turn":sum(r["length_terminations"] for r in records)/max(1,turns),
              "public_interaction":{"format_errors":action_counts["format_error"],
                  "binding_failures":action_counts["binding_failed"],"environment_invalid":action_counts["environment_invalid"],
+                 **({"precondition_conflicts":action_counts["precondition_conflict"]} if config["runtime"].get("shop_purchase_flow") else {}),
                  "legal_no_progress":progress_counts["legal_no_progress"],"public_state_loops":sum(bool(e["loop"]) for e in steps),
                  "invalid_no_progress":progress_counts["invalid_no_progress"],
                  "episode_termination_reasons":dict(Counter(r["termination_reason"] for r in records))},
@@ -129,6 +138,8 @@ def evaluate(policy,env,registry,config,output,split="dev",experience=None,limit
              "parameters_unchanged_during_eval":True,"memory_unchanged":True,
              "frozen_base_parameters_unchanged":True if base_before is not None else None,"evaluation_contract":contract,
              "results_sha256":file_sha(result),"task_ids_sha256":digest(sorted(ids))}
+    if "max_environment_steps" in runtime:
+        summary["mean_environment_steps"] = sum(r["environment_steps"] for r in records) / n
     summary["decision_recovery"] = recovery_diagnostics([e for r in records for e in r["history"] if e["phase"] == "execute"] +
                                                       [e for r in records for e in r["manager_operations"]])
     if actor_teacher is not None:

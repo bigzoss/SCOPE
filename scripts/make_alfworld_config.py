@@ -16,6 +16,7 @@ def main():
     config=json.loads(Path("configs/shopsim.json").read_text())
     config["environment"]={"kind":"alfworld_http","base_url":args.url,"manifest":args.manifest}
     config["runtime"]["max_turns"]=30
+    config.setdefault("evaluation", {}).update(max_environment_steps=50, max_actor_proposals=100)
     config["training"]["method"]="global"
     atomic_json(target,config)
 

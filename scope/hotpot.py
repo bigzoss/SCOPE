@@ -96,7 +96,8 @@ def answer_from_view(policy, question, view, boundary):
     return (sample.text.splitlines()[0] if sample.text.splitlines() else ""), sample
 
 
-def _model_messages(stage, menu, public, evidence, kept, sentence_candidates=False, shared_interface=False):
+def _model_messages(stage, menu, public, evidence, kept, sentence_candidates=False, shared_interface=False,
+                    state_claims=None):
     descriptions = {letter:{**{k:v for k,v in option.items() if k not in {"evidence","expected_revision"}},
                            **({"title":evidence[option["evidence"]["id"]]["title"],
                                "preview":evidence[option["evidence"]["id"]]["text"][
@@ -114,6 +115,8 @@ def _model_messages(stage, menu, public, evidence, kept, sentence_candidates=Fal
                                  for e in kept]}
     if kind == "retrieve":
         content["question"] = public["question"]
+    if state_claims is not None:
+        content["claims"] = state_claims
     if shared_interface:
         from .candidate_actions import choice_payload
         options = {}
@@ -130,6 +133,8 @@ def _model_messages(stage, menu, public, evidence, kept, sentence_candidates=Fal
                                     support_status="supported", evidence_refs=[ref])
                 else:
                     proposal.update(evidence_id=ref["id"] , start=ref["start"], end=ref["end"], preview=quote[:180])
+            elif op == "UPDATE_STATE":
+                proposal = dict(option["proposal"])
             elif op == "COMPRESS":
                 proposal["items"] = [{"evidence_ref":ref,"text":evidence[ref["id"]]["text"][ref["start"]:ref["end"]]}
                                      for ref in option["refs"]]
@@ -139,25 +144,45 @@ def _model_messages(stage, menu, public, evidence, kept, sentence_candidates=Fal
         return choice_payload({"phase":"state" if kind == "write" else "context", "stage":stage,
             "goal": public["question"] if kind == "retrieve" else "Preserve useful public information for a later query.",
             "revision":next(iter(menu.values()))["expected_revision"], "working_memory":content["working_memory"],
-            "management_reason":instructions[kind], "claims":[], "recent_evidence":[]}, options)
+            "management_reason":instructions[kind], "claims":state_claims or [], "recent_evidence":[]}, options)
     return [{"role":"system","content":instructions[kind]+" Answer with one action letter."},
             {"role":"user","content":canonical(content)}]
 
 
 def rollout(policy, public, split, seed, *, greedy=False, factual=None, intervention=None,
             intervention_label=None, chooser=None, sentence_candidates=False, record_prompts=False,
-            bridge_candidates=False, shared_interface=False):
+            bridge_candidates=False, shared_interface=False, resample_intervention=False,
+            decision_seed=None, continuation_seed=None, greedy_continuation=None, decision_labels=None,
+            enhanced_memory=False):
     """Execute a complete policy trajectory or a matched replay with one forced no-op."""
     if (factual is None) != (intervention is None):
         raise ContractError("A counterfactual needs its factual trajectory and intervention stage")
+    if intervention is not None and (type(intervention) is not int or not 0 <= intervention < len(STAGES)):
+        raise ContractError("Invalid intervention stage")
+    if factual is not None and (factual["task_id"] != public["id"] or factual["seed"] != seed
+                                or factual["split"] != split):
+        raise ContractError("Replay task, split, or public-stream seed changed")
+    if resample_intervention and (factual is None or intervention_label is not None or chooser is not None
+                                 or decision_seed is None or greedy):
+        raise ContractError("Local candidate must be sampled independently from the student policy")
+    if decision_seed is not None and not resample_intervention:
+        raise ContractError("Decision seed requires a sampled intervention")
+    if decision_labels is not None and not resample_intervention:
+        raise ContractError("A conditional action mask requires a sampled intervention")
     if bridge_candidates and not sentence_candidates:
         raise ContractError("Bridge candidates require sentence-aligned excerpts")
     if shared_interface and not sentence_candidates:
         raise ContractError("Shared memory interface requires sentence-aligned excerpts")
+    if enhanced_memory and not (sentence_candidates and shared_interface):
+        raise ContractError("Enhanced memory requires sentence candidates and shared interface")
     atlas = StateAtlas(Scope(split,public["id"],str(seed)))
     tools = ToolExecutor()
     budget = Budget(retrievals=2)
     archive, kept, actions, samples = {}, [], [], []
+    if enhanced_memory:
+        from .hotpot_memory import MentionAdapter, MentionValidator, bridge_options, expanded_options
+        tools = ToolExecutor(adapter=MentionAdapter(archive))
+        tools.validator = MentionValidator(adapter=tools.validator.adapter)
     query_spans = {}
     documents = ordered_documents(public,seed)
     try:
@@ -204,19 +229,40 @@ def rollout(policy, public, split, seed, *, greedy=False, factual=None, interven
                     options.append({"operation":"RETRIEVE","evidence":ref})
                     if len(options)==(7 if sentence_candidates else 5):
                         break
+                if enhanced_memory:
+                    bridges = bridge_options(archive, kept, public["question"])
+                    seen = {digest(x["evidence"]) for x in bridges}
+                    options = [options[0], *bridges[:3], *[x for x in options[1:] if digest(x["evidence"]) not in seen]]
+            if enhanced_memory:
+                tools.validator.domain_predicates = tools.validator.adapter.state_predicates
+                options = expanded_options(stage, options, atlas, archive, kept, tools)
             revision = atlas.revision
             options.sort(key=lambda op:digest([seed,stage,op]))
             menu = {letter:{**op,"expected_revision":revision} for letter,op in zip("ABCDEFGH",options)}
-            messages = _model_messages(stage,menu,public,archive,kept,sentence_candidates,shared_interface)
-            boundary = digest([atlas.fingerprint(),kept,menu,messages])
+            claims = ([{k: c[k] for k in ("entity", "predicate", "value", "support_status", "evidence_refs")}
+                       for c in atlas.nodes("Claim")[-8:]] if enhanced_memory else None)
+            messages = _model_messages(stage,menu,public,archive,kept,sentence_candidates,shared_interface,claims)
+            manager_input_limit = 4096 if enhanced_memory else 2048
+            budget_before = asdict(budget)
+            versions_before = dict(policy.versions)
+            boundary = digest([atlas.fingerprint(),kept,menu,messages,budget_before,versions_before])
+            working_before = [dict(ref) for ref in kept]
             sample = None
             decision = None
             if factual and index<=intervention:
                 original = factual["actions"][index]
                 if original["boundary"]!=boundary:
                     raise ContractError("Counterfactual did not reconstruct the exact public prefix")
-                label = (original["choice"] if index<intervention else (intervention_label or next(
-                    k for k,v in menu.items() if v["operation"]==NOOP[stage])))
+                if index == intervention and resample_intervention:
+                    policy.torch.manual_seed(decision_seed)
+                    labels = list(menu) if decision_labels is None else list(decision_labels)
+                    if not labels or len(set(labels)) != len(labels) or not set(labels) <= set(menu):
+                        raise ContractError("Conditional action mask must be a nonempty subset of the public menu")
+                    sample = policy.sample_choice(messages,stage,boundary,labels,manager_input_limit,False)
+                    label = sample.text
+                else:
+                    label = (original["choice"] if index<intervention else (intervention_label or next(
+                        k for k,v in menu.items() if v["operation"]==NOOP[stage])))
             elif len(menu)==1:
                 label = next(iter(menu))
             elif chooser:
@@ -228,25 +274,33 @@ def rollout(policy, public, split, seed, *, greedy=False, factual=None, interven
                 decision = chooser(messages,menu,public_options,working_sources)
                 label = decision["choice"]
             else:
-                policy.torch.manual_seed(int(digest([seed,stage])[:8],16))
-                sample = policy.sample_choice(messages,stage,boundary,list(menu),2048,greedy)
+                downstream = intervention is not None and index > intervention
+                rng = continuation_seed if downstream and continuation_seed is not None else seed
+                policy.torch.manual_seed(int(digest([rng,stage])[:8],16))
+                choose_greedy = greedy_continuation if downstream and greedy_continuation is not None else greedy
+                sample = policy.sample_choice(messages,stage,boundary,list(menu),manager_input_limit,choose_greedy)
                 label = sample.text
             if label not in menu:
                 raise ContractError("Proposed choice is not in the verified action menu")
             choice = menu[label]
             op = choice["operation"]
             result = None
-            if op in {"STORE","RETRIEVE"}:
+            if op in {"STORE","RETRIEVE", "UPDATE_STATE"}:
                 ref = choice["evidence"]
                 record = atlas.evidence(ref["id"])
-                if op=="RETRIEVE":
+                if op == "UPDATE_STATE":
+                    result = tools.execute(atlas, {}, choice["proposal"], "state", budget, "")
+                elif op=="RETRIEVE":
                     result = tools.execute(atlas,{},{"operation":"FETCH_EVIDENCE","expected_revision":revision,
                         "evidence_id":ref["id"],"start":ref["start"],"end":ref["end"]},"context",budget,"")
                 else:
                     result = tools.execute(atlas,{},{"operation":"PROPOSE_STATE_UPDATE","expected_revision":revision,
                         "entity":record["entity"],"predicate":"quoted_text","value":record["text"][ref["start"]:ref["end"]],
                         "support_status":"supported","evidence_refs":[ref]},"state",budget,"")
-                kept = [old for old in kept if old["id"]!=ref["id"]] + [ref]
+                if enhanced_memory:
+                    kept = list({digest(old): old for old in [*kept, ref]}.values())
+                else:
+                    kept = [old for old in kept if old["id"]!=ref["id"]] + [ref]
             elif op=="CLEAR":
                 kept = []
             elif op=="COMPRESS":
@@ -260,8 +314,11 @@ def rollout(policy, public, split, seed, *, greedy=False, factual=None, interven
             atlas.append_public(op,"action_receipt")
             actions.append({"stage":stage,"boundary":boundary,"atlas_revision":revision,"menu":menu,"choice":label,
                             "operation":op,"tool_result":result,"working_after":list(kept),
+                            "working_before":working_before,
+                            "budget_before":budget_before,"policy_versions":versions_before,
                             "sample":asdict(sample) if sample else None,
                             **({"student_messages":messages} if record_prompts else {}),
+                            **({"state_claims_before":claims} if enhanced_memory else {}),
                             **({"teacher_decision":decision} if decision else {})})
             samples.append(sample)
         shown = answer_view(archive,kept)
@@ -271,6 +328,14 @@ def rollout(policy, public, split, seed, *, greedy=False, factual=None, interven
         trace = {"task_id":public["id"],"seed":seed,"split":split,"intervention":intervention,"actions":actions,
                  "answer_view":shown,"answer":answer,"answer_sample":asdict(sample),"atlas":atlas.export(),
                  **({"query_extracted_spans":list(query_spans.values())} if bridge_candidates else {})}
+        if enhanced_memory:
+            trace["memory_protocol"] = "public_relation_candidates_v1"
+        if continuation_seed is not None:
+            trace["replay_sampling"] = {"continuation_seed":continuation_seed,
+                "decision_seed":decision_seed,"resample_intervention":resample_intervention,
+                "greedy_continuation":greedy_continuation,"reader_greedy":True}
+        from .hotpot_provenance import memory_flow
+        trace["memory_flow"] = memory_flow(trace)
         return trace,samples
     finally:
         atlas.close()

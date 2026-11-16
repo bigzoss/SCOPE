@@ -7,13 +7,13 @@ import requests
 from .contracts import ContractError,InfrastructureError
 from .data import SplitRegistry
 from .interaction import ActionAdapter, Binding
-from .state_graph import ALF_PREDICATES, alfworld_facts
+from .state_graph import ALF_PLACEMENT_RECEIPT, ALF_PREDICATES, alfworld_facts
 from .io import digest,file_sha
 
 CONTRACT="alfworld-text-public-v1"
 SYSTEM=("You are an agent in a household text environment. Complete the public task. Return a brief Thought "
         "and exactly one line Action: command. Commands: look; inventory; go to receptacle; open receptacle; "
-        "close receptacle; take object from receptacle; put object in/on receptacle; clean object with sinkbasin; "
+        "close receptacle; take object from receptacle; move object to receptacle; clean object with sinkbasin; "
         "heat object with microwave; cool object with fridge; use desklamp. Use exact observed object names/numbers. "
         "Use inventory, not check inventory. A task saying look at an object under a lamp is a goal, not an action command. "
         "Check possession and task prerequisites before using a device. "
@@ -30,7 +30,7 @@ _ENTITY = r"[a-z][a-z0-9_]* \d+"
 _ENTITY_PATTERN = re.compile(rf"\b{_ENTITY}\b", re.I)
 _COMMANDS = tuple(re.compile(pattern) for pattern in (
     r"(?:go to|open|close|use|examine) (.+)",
-    r"take (.+) from (.+)", r"put (.+) in/on (.+)",
+    r"take (.+) from (.+)", r"move (.+) to (.+)",
     r"(?:clean|heat|cool) (.+) with (.+)",
 ))
 
@@ -65,7 +65,7 @@ class ALFWorldActions(ActionAdapter):
         # Candidates describe public preconditions, never assert task completion.
         for obj in state.get("held", []):
             if here and here.rsplit(" ", 1)[0] in locations and state.get("containers", {}).get(here) is not False:
-                yield {"command": f"put {obj} in/on {here}", "reason": "place_held_object_at_current_location"}
+                yield {"command": f"move {obj} to {here}", "reason": "place_held_object_at_current_location"}
             for verb, device in (("clean", "sinkbasin"), ("heat", "microwave"), ("cool", "fridge")):
                 if here and here.rsplit(" ", 1)[0] == device:
                     yield {"command": f"{verb} {obj} with {here}", "reason": "process_held_object_at_observed_device"}
@@ -80,12 +80,13 @@ class ALFWorldActions(ActionAdapter):
         return ["alf:" + entity for entity in [state.get("location"), *state.get("held", [])] if entity]
 
     def confirmation_target(self, command, entity):
-        change = re.fullmatch(rf"(take|put|open|close|clean|heat|cool) ({_ENTITY})(?: .+)?", command)
+        command = self.transport_command(command)
+        change = re.fullmatch(rf"(take|move|open|close|clean|heat|cool) ({_ENTITY})(?: .+)?", command)
         if not change:
             return None
         verb, name = change.groups()
         predicate, value = {
-            "take": ("held", True), "put": ("held", False),
+            "take": ("held", True), "move": ("held", False),
             "open": ("container_open", True), "close": ("container_open", False),
             "clean": ("cleaned", True), "heat": ("temperature", "hot"), "cool": ("temperature", "cold"),
         }[verb]
@@ -94,7 +95,7 @@ class ALFWorldActions(ActionAdapter):
     def recovery_slots(self, command):
         if not command:
             return ()
-        placement = re.fullmatch(rf"put ({_ENTITY}) in/on ({_ENTITY})", command)
+        placement = re.fullmatch(rf"move ({_ENTITY}) to ({_ENTITY})", self.transport_command(command))
         treatment = re.fullmatch(rf"(?:clean|heat|cool) ({_ENTITY}) with ({_ENTITY})", command)
         if placement or treatment:
             obj, container = (placement or treatment).groups()
@@ -107,7 +108,13 @@ class ALFWorldActions(ActionAdapter):
             return "inventory"
         # 'receptacle' is a schema placeholder, not part of the observed entity name.
         command = re.sub(r"^(go to|open|close) receptacle (?=" + _ENTITY + r"$)", r"\1 ", command)
-        return re.sub(r"^(put .+?) (?:in|on) (.+)$", r"\1 in/on \2", command)
+        return self.transport_command(command)
+
+    def transport_command(self, command):
+        # TextWorld's placement verb is "move". Preserve the proposed arguments
+        # so the binder can still report an absent or ambiguous entity.
+        match = re.fullmatch(r"put (.+?) (?:in/on|into|in|on) (.+)", command.strip().removesuffix("."), re.I)
+        return f"move {match[1].lower()} to {match[2].lower()}" if match else command
 
     def bind(self, command, state):
         if command in {"look", "inventory"}:
@@ -144,13 +151,16 @@ class ALFWorldActions(ActionAdapter):
         elif carrying:
             state["held"] = sorted(set(_ENTITY_PATTERN.findall(carrying[1])))
         taken = re.search(rf"you (?:pick up|take) (?:the )?({_ENTITY})\b", text)
-        placed = re.search(rf"you put (?:the )?({_ENTITY}) (?:in|on|into) (?:the )?({_ENTITY})\b", text)
+        placed = re.search(ALF_PLACEMENT_RECEIPT, text)
+        if placed:
+            moved, legacy_put, destination = placed.groups()
+            placed = (moved or legacy_put, destination)
         if taken:
             state["held"] = sorted(held | {taken[1]})
             state["placements"] = {k: v for k, v in previous.get("placements", {}).items() if k != taken[1]}
         elif placed:
-            state["held"] = sorted(held - {placed[1]})
-            state["placements"] = {**previous.get("placements", {}), placed[1]: placed[2]}
+            state["held"] = sorted(held - {placed[0]})
+            state["placements"] = {**previous.get("placements", {}), placed[0]: placed[1]}
         opened = re.search(rf"you (open|close) (?:the )?({_ENTITY})\b", text)
         containers = dict(previous.get("containers", {}))
         if opened:
@@ -173,7 +183,7 @@ class ALFWorldActions(ActionAdapter):
         if taken:
             object_locations[taken[1]] = "agent"
         elif placed:
-            object_locations[placed[1]] = placed[2]
+            object_locations[placed[0]] = placed[1]
         if object_locations:
             state["object_locations"] = object_locations
         return state
@@ -247,6 +257,7 @@ class ALFWorldEnvironment:
         return self.step_command(command)
 
     def step_command(self, command):
+        command = self.action_adapter.transport_command(command)
         value=self._post("/step",{"session_id":self.sid,"command":command})
         if type(value.get("success")) is not bool or type(value.get("done")) is not bool:
             raise InfrastructureError("ALFWorld success/done must be explicit booleans")

@@ -52,13 +52,20 @@ class StateAtlas:
         if kind not in {"observation", "requirement", "action_receipt"}:
             raise ContractError("Only public observation kinds are admitted")
         # Callers pass strings and explicit public fields, never raw simulator result objects.
-        if set(public_fields)-{"clickables","terminal"}:
+        if set(public_fields)-{"clickables","terminal","action_receipt_id"}:
             raise ContractError("Hidden or reserved metadata cannot enter public evidence")
         assert_public_text(text)
         if not isinstance(entity,str) or not entity:raise ContractError("Entity ID must be a nonempty string")
         if "terminal" in public_fields and type(public_fields["terminal"]) is not bool:raise ContractError("Terminal flag must be boolean")
         if "clickables" in public_fields and (not isinstance(public_fields["clickables"],list) or any(not isinstance(x,str) for x in public_fields["clickables"])):
             raise ContractError("Public clickables must be a list of strings")
+        action = None
+        if "action_receipt_id" in public_fields:
+            action = self.evidence(public_fields["action_receipt_id"])
+            if (kind != "observation" or action["kind"] != "action_receipt"
+                    or action["entity"] != entity or action["revision"] != self.revision):
+                raise ContractError("Observation must link to its immediate public action receipt")
+            public_fields["action_command"] = action["text"]
         with self.db:
             rev = self._advance()
             eid = f"obs_{rev:06d}_{digest([self.scope.key,text,kind,entity])[:10]}"
@@ -69,6 +76,8 @@ class StateAtlas:
             entity_node = {"id": entity, "scope": plain(self.scope)}
             self.db.execute("INSERT OR IGNORE INTO nodes VALUES(?,?,?,1)", (entity, "Entity", canonical(entity_node)))
             self.db.execute("INSERT INTO edges VALUES(?,?,?)", (eid, "ABOUT", entity))
+            if action:
+                self.db.execute("INSERT INTO edges VALUES(?,?,?)", (eid, "DERIVED_FROM", action["id"]))
             self._event("observation", {"evidence_id": eid}, rev)
         return record
 
@@ -166,6 +175,12 @@ class StateAtlas:
                     self.db.execute("INSERT OR IGNORE INTO nodes VALUES(?,?,?,1)",
                                     (subject, "Entity", canonical({"id":subject,"scope":plain(self.scope)})))
             self.db.execute("INSERT INTO nodes VALUES(?,?,?,1)", (node_id, node["kind"], canonical(node)))
+            if "mention_target" in node:
+                target = self.node(node["mention_target"])
+                if (target["kind"] != "Entity" or not target["active"] or
+                        node["predicate"] != "mentions:" + node["mention_target"] or node["value"] is not True):
+                    raise ContractError("Invalid evidence-grounded mention target")
+                self.db.execute("INSERT OR IGNORE INTO edges VALUES(?,?,?)", (node_id, "TARGETS", node["mention_target"]))
             for ref in node.get("evidence_refs", []):
                 self.evidence(ref["id"])
                 relation="SUPPORTED_BY" if node.get("support_status")=="supported" and node.get("validation_mode")!="semantic_check_ablated" else "CITES"

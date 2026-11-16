@@ -68,6 +68,17 @@ CUDA_VISIBLE_DEVICES='' $PY -m pytest -q
 
 `dev`曾参与协议调试，900历史集合及原任务池也曾被旧模型预测，不作为全新盲测。默认不启动任何最终测试。正式测试前还需按设计完成暴露审计。
 
+### AgeMem ShopSimulator 对照评估
+
+使用 AgeMem 训练记录的 protocol-ustc.json、同一个底座和同一批购物任务。训练组启用指定的 LoRA，AgeMem-noRL 关闭该 LoRA。两组每题最多 30 条送入环境的购物命令和 60 次主模型决策，成交后立即结束。每次生成只消耗一次模型决策，包括返回记忆工具调用或格式错误。工具条数和购物动作数分别记录。
+
+在已有 Trinity/AgeMem 环境下运行以下入口。训练 checkpoint 和任务协议目录由实参指定。
+
+```bash
+$PY -m scripts.eval_agemem_shop --run /absolute/path/to/agemem_run \
+  --adapter /absolute/path/to/verified/lora_adapter --output runs/agemem_shop_30_60
+```
+
 ## 管理器预热
 
 先收集**训练池**公开轨迹。以下示例20任务只是数据收集规模，预热规模需按设计确定：
@@ -163,7 +174,9 @@ $PY -m scope.cli evaluate --config configs/alfworld.json --split test \
   --checkpoint /absolute/path/to/source/checkpoint --output runs/alfworld_transfer
 ```
 
-使用项目已有的外部ALFWorld public-v1服务，SCOPE不启动、重启或清理该共享服务。适配器仅向模型提供公开任务和观察，另行保存二元任务分数。manifest按官方train/valid_seen/valid_unseen区分，并检查精确game/task重叠；官方seen不等于模型训练暴露已知。已核验现有manifest接口可被解析，但没有执行目标任务，不报告泛化成功率。
+使用项目已有的外部ALFWorld public-v1服务，SCOPE不启动、重启或清理该共享服务。适配器仅向模型提供公开任务和观察，另行保存二元任务分数。manifest按官方train/valid_seen/valid_unseen区分，并检查精确game/task重叠；官方seen不等于模型训练暴露已知。放置动作在发送前统一为 TextWorld 的 `move <object> to <receptacle>`。历史的 `put ... in/on ...` 仍可解析；持有关系与物品位置由环境的公开放置回执更新。
+
+ALFWorld 冻结评估默认允许 50 个实际环境步骤，另设 100 次执行器提案上限。发给环境的命令均计环境步，包括被环境拒绝的命令。格式错误、绑定失败和循环拦截只消耗提案。评估逐题保存环境步数，成功或环境终止后立即结束。预算在 evaluation 中配置，训练仍读取 runtime 的原轮数。
 
 ### 跨 benchmark 的公开交互接口
 
@@ -175,7 +188,16 @@ $PY -m scope.cli evaluate --config configs/alfworld.json --split test \
 
 ### 状态图谱与配对局部信用
 
-在新实验的 `runtime` 中设置 `state_graph: true`，配合 `loop_policy: "state"` 使用。适配器从公开观察提取带精确字符区间的 `PublicFact`。状态槽位按证据版本更新，旧值保留供按版本回查。同版本的矛盾证据进入冲突状态。动作回执只证明尝试过。ALFWorld 支持位置、持有、容器开闭与处理状态。ShopSimulator 的购买提示显示已确认、冲突和待确认的公开约束，适用于能从文本明确识别的预算上限和颜色。其他要求仍保留原文并标为待核验。工具和提示都不会自动阻断购买。
+在新实验的 `runtime` 中设置 `state_graph: true`，配合 `loop_policy: "state"` 使用。适配器从公开观察提取带精确字符区间的 `PublicFact`。状态槽位按证据版本更新，旧值保留供按版本回查。同版本的矛盾证据进入冲突状态。动作回执只证明尝试过。ALFWorld 支持位置、持有、容器开闭与处理状态。ShopSimulator 的购买提示显示已确认、冲突和待确认的公开约束，适用于能从文本明确识别的预算上限和颜色。其他要求仍保留原文并标为待核验。默认配置只提示冲突。购物域执行器的独立配置启用下方的购买前检查。
+
+使用已训练的 ShopSimulator SFT epoch3 执行器做冻结开发评估：
+
+```bash
+$PY -m scope.cli evaluate --config configs/shopsim_purchase_sft.json \
+  --split dev --limit 9 --manage-service --output runs/shopsim_purchase_sft_dev
+```
+
+该配置使用规则管理器，便于单独测量执行器和购买流程。开启 `runtime.shop_purchase_flow` 后，服务从当前商品页的公开购买表单和规格控件提取商品编号、已确认规格、尚未选择的规格和页面报价。执行器核对这些字段后选择下一步。只有明确的预算上限与当前已选完规格的单一公开报价冲突时，才拒绝发送购买命令，并记录 `precondition_conflict`。其他待核对约束由执行器结合当前页面判断。页面报价用于公开决策，终局奖励仍由模拟器按原协议计算。
 
 状态阶段可用一次 `RETRIEVE` 或 `FETCH_EVIDENCE`，其后允许提交状态更新。`RETRIEVE` 接受 `entity`、`predicate` 和 `as_of_revision`。管理器仅在待核验、冲突、停滞或达到 `compression_after` 阈值时调用。工作视图保留任务要求和当前相关状态，显示近期尝试及重复次数。摘要以原文引用替换较早历史，并去除重复的检索片段。评估分别记录检索证据进入视图和模型显式引用，引用本身不能证明效果。
 

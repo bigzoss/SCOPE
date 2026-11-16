@@ -13,6 +13,7 @@ import time
 import uuid
 from .public_data import project_transition_text
 from .lifecycle import install_parent_guard
+from .shop_purchase import append_panel, purchase_panel
 
 
 def main():
@@ -26,6 +27,7 @@ def main():
     parser.add_argument("--seed",type=int,default=233)
     parser.add_argument("--max-snapshots",type=int,default=512)
     parser.add_argument("--owner-pid",type=int)
+    parser.add_argument("--purchase-panel",action="store_true")
     args=parser.parse_args()
     install_parent_guard(args.owner_pid)
     os.environ["CUDA_VISIBLE_DEVICES"]=""
@@ -66,7 +68,10 @@ def main():
     def public_page():
         actions=env.get_available_actions()
         clicks=[c for c in actions["clickables"] if c!="search"]
-        return env.observation+f"\n\n搜索功能是否可用: {actions['has_search_bar']}\n\n可点击的按钮: "+json.dumps(clicks,ensure_ascii=False),clicks
+        page = env.observation+f"\n\n搜索功能是否可用: {actions['has_search_bar']}\n\n可点击的按钮: "+json.dumps(clicks,ensure_ascii=False)
+        if args.purchase_panel and "buy now" in clicks:
+            page = append_panel(page, purchase_panel(env._parse_html()))
+        return page, clicks
 
     def capture():
         # Copy every mutable environment attribute, browser data, sessions and RNG.
@@ -97,7 +102,8 @@ def main():
     def health():
         return {"ready":True,"manifest_sha256":manifest_sha,"manifest_unchanged":file_digest(args.manifest)==manifest_sha,
                 "allowed_tasks":len(allowed),"available":int(lease is None),"snapshot_count":len(snapshots),
-                "restore_level":"native_private_state","pid":os.getpid()}
+                "restore_level":"native_private_state","pid":os.getpid(),
+                **({"purchase_panel":"public_buy_form_v1"} if args.purchase_panel else {})}
 
     @app.post("/reset")
     def reset():

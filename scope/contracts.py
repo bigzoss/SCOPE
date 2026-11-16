@@ -12,6 +12,10 @@ class InfrastructureError(RuntimeError):
     """Never convert an unavailable environment into a model failure reward."""
 
 
+class TeacherBudgetExhausted(InfrastructureError):
+    """A bounded teacher budget is exhausted; cached requests remain reusable."""
+
+
 @dataclass(frozen=True)
 class Scope:
     split: str

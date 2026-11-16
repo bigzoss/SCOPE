@@ -170,7 +170,8 @@ def test_paired_credit_replays_one_sample_and_excludes_rule_finish():
     assert all(c["outcomes"][0].events[0]["replayed_sample"] for c in candidates)
 
 
-def test_paired_training_step_updates_only_manager_lora(tmp_path):
+@pytest.mark.parametrize("objective,trained_actions", [("group_relative", 2), ("paired_delta", 1)])
+def test_paired_training_step_updates_only_manager_lora(tmp_path, objective, trained_actions):
     from test_policy import tiny_policy
     from scope.training import train
 
@@ -192,13 +193,14 @@ def test_paired_training_step_updates_only_manager_lora(tmp_path):
             return ["1"]
 
     cfg = {"runtime":{"state_graph":True,"max_turns":3},
-           "training":{"method":"conditional","local_credit":"paired","updates":1,
+           "training":{"method":"conditional","local_credit":"paired","local_objective":objective,"updates":1,
                        "group_size":2,"local_group_size":2,"probe_updates":[1]}}
     before_actor, before_manager = policy.fingerprint("actor"), policy.fingerprint("manager")
     train(policy, BranchShop(), Registry(), cfg, tmp_path, {"test":"paired"})
     row, = read_jsonl(tmp_path / "train_metrics.jsonl")
     assert row["local"]["global_manager_credit_applied"] is False
-    assert row["trained_actions"] == 2 and row["task_policy_gradient"] and row["grad_norm"] > 0
+    assert row["local"]["objective"] == objective
+    assert row["trained_actions"] == trained_actions and row["task_policy_gradient"] and row["grad_norm"] > 0
     assert policy.fingerprint("manager") != before_manager and policy.fingerprint("actor") == before_actor
 
 
@@ -221,3 +223,21 @@ def test_compression_cost_needs_success_and_required_evidence():
     baseline.metrics["success"] = 0
     candidates[1]["outcomes"] = [outcome(0, 10, ["required"])]
     assert not paired_local_samples(boundary, candidates, [baseline], .1)[0]
+
+
+@pytest.mark.parametrize("baseline_success,candidate_success,expected", [(0, 1, 1.0), (1, 0, -1.0)])
+def test_paired_delta_keeps_homogeneous_signed_effect(baseline_success, candidate_success, expected):
+    from types import SimpleNamespace
+
+    boundary = SimpleNamespace(phase="state", opportunity="missing_evidence", role_versions={"manager":0},
+                               fingerprint=lambda: "boundary")
+    baseline = SimpleNamespace(metrics={"success":baseline_success}, events=[])
+    outcome = SimpleNamespace(metrics={"success":candidate_success}, events=[])
+    candidates = [{"sample":Sample("manager","state",[1],[token],[0.],"RETRIEVE",0,"boundary"),
+                   "accepted":True,"operation":"RETRIEVE","boundary_hash":"boundary","outcomes":[outcome]}
+                  for token in (2, 3)]
+    assert not paired_local_samples(boundary, candidates, [baseline], .1)[0]
+    weighted, report = paired_local_samples(boundary, candidates, [baseline], .1, objective="paired_delta")
+    assert [sample.advantage for sample, _ in weighted] == [expected, expected]
+    assert report["task_zero_variance"] and not report["task_zero_signal"]
+    assert not report["non_task_only_advantage"]

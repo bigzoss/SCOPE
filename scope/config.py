@@ -2,6 +2,7 @@
 import copy
 import math
 from .contracts import ContractError
+from .credit import PAIRED_OBJECTIVES
 from .interaction import ACTION_MODES, LOOP_POLICIES
 
 DEFAULT_RUNTIME={"max_turns":12,"actor_max_input":6144,"actor_max_new":256,"manager_max_input":2048,
@@ -9,7 +10,28 @@ DEFAULT_RUNTIME={"max_turns":12,"actor_max_input":6144,"actor_max_new":256,"mana
     "probe_query_horizon":1,"sequence_memory_scope":"task","invalid_weight":.05,"cost_weight":.02,
     "action_mode":"legacy","loop_policy":"legacy","state_graph":False,"memory_choice":False,
     "compression_after":6,"compression_min_chars":1800,"shared_memory":False,"disabled_memory_tools":[],
-    "decision_evidence":False,"decision_recovery":False,"compact_actor_view":False,"actor_history_turns":2}
+    "decision_evidence":False,"decision_recovery":False,"compact_actor_view":False,"actor_history_turns":2,"shop_purchase_flow":False}
+
+
+
+def evaluation_runtime(config):
+    """Resolve an ALFWorld evaluation cap independently of training turns."""
+    runtime = config["runtime"]
+    if config.get("environment", {}).get("kind") != "alfworld_http":
+        return runtime
+    settings = config.get("evaluation", {})
+    steps = settings.get("max_environment_steps", 50)
+    proposals = settings.get("max_actor_proposals", 100)
+    if type(steps) is not int or steps < 1:
+        raise ContractError("evaluation.max_environment_steps must be a positive integer")
+    if type(proposals) is not int or proposals < steps:
+        raise ContractError("evaluation.max_actor_proposals must cover the environment step budget")
+    budget = {**DEFAULT_RUNTIME, **runtime}
+    # Each proposal has at most two state-manager samples and one context-manager sample.
+    per_proposal = budget["actor_max_input"] + budget["actor_max_new"] + 3 * budget["manager_max_input"]
+    total = proposals * per_proposal + budget["manager_episode_tokens"]
+    return {**runtime, "max_environment_steps": steps, "max_turns": proposals,
+            "total_tokens": max(budget["total_tokens"], total)}
 
 
 def validate_config(source):
@@ -33,13 +55,16 @@ def validate_config(source):
     if runtime["probe_query_horizon"]!=1:raise ContractError("Task-scoped memory supports only current-query local credit (probe_query_horizon=1)")
     for key in ("invalid_weight","cost_weight"):
         if type(runtime[key]) not in (int,float) or not math.isfinite(runtime[key]) or runtime[key]<0:raise ContractError("Invalid reward coefficient "+key)
-    for key in ("semantic_validation","disable_experience","state_graph","memory_choice","shared_memory","decision_evidence","decision_recovery","compact_actor_view"):
+    for key in ("semantic_validation","disable_experience","state_graph","memory_choice","shared_memory","decision_evidence","decision_recovery","compact_actor_view","shop_purchase_flow"):
         if key in runtime and type(runtime[key]) is not bool:raise ContractError(key+" must be boolean")
     if runtime.get("manager_mode","learned") not in {"learned","rule"}:raise ContractError("Unknown manager mode")
     integer(runtime["actor_history_turns"], "runtime.actor_history_turns")
     if runtime["compact_actor_view"] and not runtime["decision_recovery"]:
         raise ContractError("Compact actor view requires decision recovery and its protected state")
     if runtime["action_mode"] not in ACTION_MODES:raise ContractError("Unknown runtime.action_mode")
+    if runtime["shop_purchase_flow"] and (cfg["environment"].get("kind","shopsim") != "shopsim" or
+                                           runtime["action_mode"] != "grounded"):
+        raise ContractError("Shop purchase flow requires ShopSimulator and grounded actions")
     if runtime["memory_choice"] and not runtime["state_graph"]:raise ContractError("Memory choice requires state_graph")
     disabled = runtime["disabled_memory_tools"]
     if not isinstance(disabled, list) or any(x not in ("RETRIEVE","SUMMARIZE") for x in disabled) or len(disabled) != len(set(disabled)):
@@ -57,6 +82,9 @@ def validate_config(source):
     if train.get("method","conditional") not in {"global","window","conditional"}:raise ContractError("Unknown training method")
     credit = train.get("local_credit", "legacy")
     if credit not in {"legacy", "paired"}:raise ContractError("Unknown training.local_credit")
+    objective = train.get("local_objective", "group_relative")
+    if objective not in PAIRED_OBJECTIVES or (objective == "paired_delta" and credit != "paired"):
+        raise ContractError("training.local_objective must be group_relative or paired_delta with paired credit")
     if credit == "paired" and (train.get("method","conditional") != "conditional" or not runtime["state_graph"]):
         raise ContractError("Paired local credit requires conditional training and runtime.state_graph")
     hints = train.get("teacher_probe_hints")
@@ -101,5 +129,6 @@ def validate_config(source):
     integer(evaluation.get("sequence_length",2),"evaluation.sequence_length")
     integer(evaluation.get("seed",233),"evaluation.seed",0)
     cfg["runtime"]=runtime
+    evaluation_runtime(cfg)
     cfg.setdefault("split_seed",233)
     return cfg

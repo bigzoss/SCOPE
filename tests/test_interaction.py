@@ -116,3 +116,52 @@ def test_new_benchmark_reuses_rollout_and_evaluation(tmp_path):
     assert actions[-1]["public_state_delta"] and actions[-1]["termination"] == "eos"
     assert "Public state loop" in policy.prompts[-1][-1]["content"]
     assert json.loads((tmp_path / "summary.json").read_text())["evaluation_contract"]["public_interaction"]["action_mode"] == "grounded"
+
+
+def test_alfworld_evaluation_counts_dispatched_steps(tmp_path, monkeypatch):
+    from scope.evaluation import evaluate
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}")
+    env = ALFWorldEnvironment("http://unused", ["dev"], manifest)
+    calls = []
+
+    def post(route, payload):
+        if route == "/reset":
+            return {"session_id":"lease", "text":"You see a desk 1.\nYour task is to: find a mug."}
+        if route == "/release":
+            return {}
+        calls.append(payload["command"])
+        return {"text":"Nothing happens.", "done":False, "success":False}
+
+    monkeypatch.setattr(env, "_post", post)
+
+    class Policy:
+        versions = {"actor":0, "manager":0}
+        proposals = 0
+
+        def fingerprint(self):
+            return "fixed"
+
+        def encode(self, messages):
+            return [1]
+
+        def sample(self, messages, role, phase, boundary, max_input, max_new, greedy=False):
+            self.proposals += 1
+            text = "Action: go to desk" if self.proposals == 1 else "Action: look"
+            return Sample(role, phase, [1], [2], [0.], text, 0, boundary)
+
+    class Registry:
+        def evaluation_sequences(self, *args):
+            return [["dev"]]
+
+    config = {"environment":{"kind":"alfworld_http"},
+              "runtime":{"action_mode":"grounded","manager_mode":"rule","max_turns":24}}
+    policy = Policy()
+    summary = evaluate(policy, env, Registry(), config, tmp_path / "eval")
+    row = read_jsonl(tmp_path / "eval/results.jsonl")[0]
+    assert calls == ["look"] * 50
+    assert policy.proposals == row["actor_turns"] == 51
+    assert row["environment_steps"] == summary["mean_environment_steps"] == 50
+    assert row["termination_reason"] == "environment_step_budget"
+    assert config["runtime"]["max_turns"] == 24

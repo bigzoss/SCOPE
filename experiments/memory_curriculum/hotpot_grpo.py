@@ -16,6 +16,7 @@ from scope.cli import model_identity, source_hashes, verify_checkpoint_base
 from scope.contracts import ContractError
 from scope.hotpot import NOOP, STAGES, rollout, score, split_row, weights
 from scope.hotpot_intervention import compression_efficiency, continuation_tokens, coverage, factorial, public_support_inventory
+from scope.hotpot_local_credit import collect_local_group, select_opportunity
 from scope.io import atomic_json, atomic_jsonl, digest, file_sha
 from scope.policy import HFPolicy
 
@@ -51,17 +52,87 @@ def rng_seed(*values, seed=SEED):
 
 
 def step_data(policy, task, update, credit_mode, global_updates, rollout_options, compression_token_weight,
-              evidence_mask="delete", training_seed=SEED):
+              evidence_mask="delete", training_seed=SEED, local_candidates=GROUP, local_repeats=1,
+              local_continuation="greedy", trajectory_objective="em_f1", local_objective="group_relative",
+              teacher=None, teacher_protocol="legacy", local_candidate_sampling="independent",
+              local_gap_stage_selection=False):
+    if teacher_protocol not in {"legacy", "evidence_v2"}:
+        raise ContractError("Unknown teacher repair protocol")
     public,gold = task
+    local_update = (update > global_updates and (credit_mode == "local" or
+                    (credit_mode == "alternating" and (update-global_updates) % 2 == 1)))
+    if local_update:
+        seed = rng_seed("local_anchor",update,seed=training_seed)
+        # Teacher repair needs the exact sampled input for supervised replay.
+        # This is collection metadata only: do not change prompts, menus, or
+        # mutate the caller's frozen rollout configuration.
+        anchor_options = dict(rollout_options)
+        if teacher is not None:
+            anchor_options["record_prompts"] = True
+        anchor,_ = rollout(policy,public,"rl_train",seed,**anchor_options)
+        preferred = LOCAL_ORDER[(update-global_updates-1) % len(LOCAL_ORDER)]
+        opportunity = select_opportunity(anchor,preferred)
+        if local_gap_stage_selection or (teacher is not None and teacher_protocol == "evidence_v2"):
+            from scope.hotpot_teacher_v2 import public_gap_opportunities
+            gaps = public_gap_opportunities(public, anchor)
+            if gaps:
+                opportunity = {k:v for k,v in gaps[0].items() if k not in {"public_gaps", "priority"}}
+        weighted,local = [],None
+        if opportunity:
+            weighted,local = collect_local_group(policy,public,gold,anchor,opportunity["stage_index"],
+                candidate_count=local_candidates,repeats=local_repeats,
+                seed=rng_seed("local_group",update,seed=training_seed),continuation=local_continuation,
+                cost_weight=compression_token_weight,rollout_options=rollout_options,objective=local_objective,
+                candidate_sampling=local_candidate_sampling)
+        record = {"step":update,"task_id":public["id"],"update_kind":"local",
+            "local_stage":opportunity["stage"] if opportunity else None,"opportunity":opportunity,
+            "primary":[{"trace":anchor,"score":score(anchor,gold)}],
+            "controls":local["controls"] if local else [],"local_group":local,
+            "skip_reason":None if local else "no_public_management_opportunity",
+            "global_advantages":[],
+            "local_reward_deltas":[d["mean"] for d in local["metrics"]["paired_strict_deltas"]] if local else [],
+            "sampling_tokens":{"primary":sum(continuation_tokens(anchor).values()),
+                "control":local["actual_sampling_tokens"]["controls"] if local else 0,
+                "local_candidates":local["actual_sampling_tokens"]["candidates"] if local else 0,
+                "evidence_reader_replays":0}}
+        eligible = teacher is not None and opportunity and (score(anchor,gold)["em"] == 0 or
+                (local and local["metrics"]["group_zero_variance"]))
+        if teacher_protocol == "evidence_v2":
+            from scope.hotpot_teacher_v2 import teacher_gate
+            record["teacher_gate"] = teacher_gate(public, gold, anchor, local)
+            eligible = teacher is not None and record["teacher_gate"]["eligible"]
+            if local and score(anchor,gold)["em"]==0 and not any(local["metrics"]["strict_returns"]) and not any(r["score"]["em"] for r in local["controls"]):
+                record["evidence_use_queue"] = {"task_id":public["id"],
+                    "route":"actor_evidence_use" if score(anchor,gold)["support_visible_recall"]==1 else "memory_evidence_gap",
+                    "annotation_used_for_offline_routing_only":True,"loss_owner":"separate_actor_sft_not_manager_grpo"}
+        if eligible:
+            if teacher_protocol == "evidence_v2":
+                from scope.hotpot_teacher_v2 import repair_prefix_v2 as repair_prefix
+            else:
+                from scope.hotpot_teacher_repair import repair_prefix
+            repair, _ = repair_prefix(policy,public,gold,anchor,opportunity["stage_index"],teacher,
+                rollout_options=rollout_options,seed=rng_seed("teacher_repair",update,seed=training_seed),
+                continuation=local_continuation,repeats=local_repeats)
+            record["teacher_repair"] = repair
+            record["sampling_tokens"]["teacher_verification"] = sum(
+                sum(continuation_tokens(r["trace"],opportunity["stage_index"]).values())
+                for runs in repair.get("branches",{}).values() for r in runs)
+        return weighted,record
+    if credit_mode in {"local","alternating"}:
+        credit_mode = "global"
     stage = LOCAL_ORDER[(update-global_updates-1)%len(LOCAL_ORDER)] if update>global_updates and credit_mode!="global" else None
     groups, controls = [], []
     for branch in range(GROUP):
         seed = rng_seed("train",update,branch,seed=training_seed)
         trace,samples = rollout(policy,public,"rl_train",seed,**rollout_options)
         group = {"trace":trace,"samples":samples,"score":score(trace,gold)}
+        if trajectory_objective == "strict":
+            group["score"]["reward"] = group["score"]["em"]
         if stage is not None and samples[stage] and trace["actions"][stage]["operation"] != NOOP[STAGES[stage]]:
             control,_ = rollout(policy,public,"rl_train",seed,factual=trace,intervention=stage,**rollout_options)
             group["control_score"] = score(control,gold)
+            if trajectory_objective == "strict":
+                group["control_score"]["reward"] = group["control_score"]["em"]
             controls.append({"branch":branch,"score":group["control_score"],"trace":control,
                              "boundary":trace["actions"][stage]["boundary"]})
             if credit_mode=="evidence":
@@ -79,11 +150,13 @@ def step_data(policy, task, update, credit_mode, global_updates, rollout_options
             if sample:
                 group["trace"]["actions"][index]["sample"] = asdict(sample)
     record = {"step":update,"task_id":public["id"],"local_stage":STAGES[stage] if stage is not None else None,
+              "update_kind":"trajectory" if stage is None else "legacy_mixed",
               "primary":[{"trace":g["trace"],"score":g["score"]} for g in groups],"controls":controls,
               "global_advantages":global_adv,"local_reward_deltas":delta}
     record["sampling_tokens"] = {
         "primary":sum(sum(continuation_tokens(g["trace"]).values()) for g in groups),
         "control":sum(sum(continuation_tokens(c["trace"]).values()) for c in controls),
+        "local_candidates":0,
         "evidence_reader_replays":sum(cell["prompt_tokens"]+cell["completion_tokens"]
                                      for c in controls for key,cell in c.get("factorial",{}).get("cells",{}).items()
                                      if key.endswith("_masked") and not cell["reused_visible"]),
@@ -140,7 +213,7 @@ def prepare_splits(args):
     return train,dev,manifest
 
 
-def execute(args, output):
+def execute(args, output, teacher=None):
     train,dev,manifest = prepare_splits(args)
     validation = manifest["validation"]
     if args.require_complete_support and (validation["outside_public"] or validation["without_support_labels"]):
@@ -166,12 +239,31 @@ def execute(args, output):
         warmstart = {"path":str(args.warmstart),"state_sha256":file_sha(args.warmstart/"state.pt")}
     rollout_options = {"sentence_candidates":args.bridge_candidates,"bridge_candidates":args.bridge_candidates,
                        "shared_interface":args.shared_interface}
+    if args.enhanced_memory:
+        rollout_options["enhanced_memory"] = True
+    if teacher is not None:
+        rollout_options["record_prompts"] = True
     receipt = {"method":"SCOPE HotpotQA graph memory GRPO pilot","seed":args.seed,"gpu":args.gpu,
         "split_seed":SEED,"evaluation_seed":SEED,
         "protocol":"supplied-paragraph stream, no external corpus search; question released after context pressure",
         **manifest,
-        "fixed_updates":updates,"outcome_only_updates":args.outcome_only_updates,"rollouts_per_update":GROUP,
+        "fixed_updates":updates,"outcome_only_updates":args.outcome_only_updates,
+        "rollouts_per_update":GROUP if args.credit_mode not in {"local","alternating"} else None,
+        "trajectory_group_size":GROUP,
         "credit_mode":args.credit_mode,"rollout_options":rollout_options,"warmstart":warmstart,
+        "local_objective":args.local_objective,
+        "teacher_repair":{"enabled":teacher is not None,"identity":getattr(teacher,"identity",None),
+            "request_budget":args.teacher_max_requests,"loss_owner":"separate_manager_sft_after_on_policy_update",
+            "trigger":"failed_student_anchor_or_zero_group_variance","learning_rate":args.teacher_learning_rate},
+        "trajectory_objective":args.trajectory_objective,
+        "local_group":{"candidates":args.local_candidates,"repeats":args.local_repeats,
+            "enabled":args.credit_mode in {"local","alternating"},
+            "rollouts_per_local_update":1+(args.local_candidates+1)*args.local_repeats,
+            "continuation":args.local_continuation,"reader":"greedy frozen actor",
+            "objective":"strict_em","decision_rng_separate":True,
+            "loss_owner":"sampled boundary manager tokens only",
+            "schedule":({"alternating":"local first after outcome-only warmup; alternate with trajectory updates",
+                         "local":"local only after outcome-only warmup"}.get(args.credit_mode,"disabled"))},
         "compression_token_weight":args.compression_token_weight,
         "evidence_mask":args.evidence_mask,
         "local_stage_order":[STAGES[i] for i in LOCAL_ORDER],"local_weight":LOCAL_WEIGHT,"learning_rate":LR,
@@ -191,12 +283,16 @@ def execute(args, output):
     torch.cuda.set_per_process_memory_fraction(min(1.,26 * 2**30/total))
     policy = HFPolicy(args.model)
     optimizer = torch.optim.AdamW(policy.parameters("manager"),lr=LR,weight_decay=0.)
+    optimizers = {"manager":optimizer}
+    if teacher is not None:
+        optimizers["teacher_manager"] = torch.optim.AdamW(policy.parameters("manager"),
+                                                        lr=args.teacher_learning_rate,weight_decay=0.)
     checkpoints = output/"checkpoints"
     start = 0
     if args.resume:
         latest = json.loads((checkpoints/"latest.json").read_text())
         path = checkpoints/latest["path"]
-        saved = load_checkpoint(path,policy,{"manager":optimizer},identity)
+        saved = load_checkpoint(path,policy,optimizers,identity)
         start = saved["step"]
         loaded_optimizer = optimizer.state_dict()
         expected_optimizer = saved["optimizers"]["manager"]
@@ -209,7 +305,7 @@ def execute(args, output):
         if args.warmstart:
             load_checkpoint(args.warmstart,policy,restore_random=False)
             policy.reset_reference("manager")
-        save_checkpoint(checkpoints,0,policy,{"manager":optimizer},identity)
+        save_checkpoint(checkpoints,0,policy,optimizers,identity)
     actor = policy.fingerprint("actor")
     base = policy.frozen_base_signature()
     target = args.stop_after or updates
@@ -220,9 +316,20 @@ def execute(args, output):
                                          "expected_updates":updates})
         torch.manual_seed(rng_seed("update",update,seed=args.seed))
         before = policy.fingerprint("manager")
-        weighted, record = step_data(policy,train[update-1],update,args.credit_mode,args.outcome_only_updates,rollout_options,
-                                     args.compression_token_weight,args.evidence_mask,args.seed)
+        try:
+            weighted, record = step_data(policy,train[update-1],update,args.credit_mode,args.outcome_only_updates,rollout_options,
+                                         args.compression_token_weight,args.evidence_mask,args.seed,args.local_candidates,
+                                         args.local_repeats,args.local_continuation,args.trajectory_objective,
+                                         args.local_objective,teacher)
+        finally:
+            if teacher is not None:
+                atomic_json(output/"teacher_api_usage.json",dict(teacher.counts))
         metrics = policy.grpo_update(weighted,"manager",optimizer,beta=.01)
+        repair = record.get("teacher_repair",{})
+        if repair.get("accepted"):
+            from scope.contracts import Sample
+            sample = Sample(**repair["supervised_sample"])
+            record["teacher_sft"] = policy.sft_update([sample],optimizers["teacher_manager"])
         after = policy.fingerprint("manager")
         if policy.fingerprint("actor")!=actor or policy.frozen_base_signature()!=base:
             raise ContractError("Manager training modified the frozen execution policy")
@@ -230,10 +337,15 @@ def execute(args, output):
                        manager_version=policy.versions["manager"],actor_unchanged=True,
                        local_controls=len(record["controls"]),global_signal=any(record["global_advantages"]),
                        local_signal=any(record["local_reward_deltas"]))
+        if record.get("local_group"):
+            local_metrics = record["local_group"]["metrics"]
+            metrics.update(local_signal=any(local_metrics["task_advantages"]),
+                           local_cost_only_signal=local_metrics["cost_only_signal"],
+                           local_task_zero_variance=local_metrics["task_zero_variance"])
         record["metrics"] = metrics
         journal = output/"updates"/f"step_{update:05d}.json"
         atomic_json(journal,record)
-        save_checkpoint(checkpoints,update,policy,{"manager":optimizer},identity,
+        save_checkpoint(checkpoints,update,policy,optimizers,identity,
                         {"journal_sha256":file_sha(journal),"metrics":metrics})
         atomic_json(output/"status.json",{"phase":"training","completed_updates":update,"expected_updates":updates})
         print(f"update={update}/{updates} task={record['task_id']} {metrics}",flush=True)
@@ -254,10 +366,27 @@ def execute(args, output):
     trained = evaluate(policy,dev,output,"final",rollout_options)
     probes = [c["factorial"] for r in units for c in r["controls"] if "factorial" in c]
     compression = [c["compression_efficiency"] for r in units for c in r["controls"] if "compression_efficiency" in c]
+    local_groups = [r["local_group"] for r in units if r.get("local_group")]
     summary = {"complete":True,"completed_updates":updates,"factual_trajectories":sum(len(r["primary"]) for r in units),
+               "teacher_repairs":sum("teacher_repair" in r for r in units),
+               "teacher_sft_updates":sum("teacher_sft" in r for r in units),
+               "update_kinds":dict(Counter(r["update_kind"] for r in units)),
+               "local_candidate_trajectories":sum(len(c["runs"]) for r in units
+                   for c in (r.get("local_group") or {}).get("candidates",[])),
+               "local_groups":sum(bool(r.get("local_group")) for r in units),
+               "local_cost_only_updates":sum(r["metrics"].get("local_cost_only_signal",False) for r in units),
+               "local_credit_diagnostics":{
+                   "zero_task_variance_groups":sum(g["metrics"]["task_zero_variance"] for g in local_groups),
+                   "all_failed_groups":sum(g["metrics"]["all_failed"] for g in local_groups),
+                   "unique_choice_counts":dict(Counter(g["metrics"]["unique_choices"] for g in local_groups)),
+                   "positive_effect_candidates":sum(d["mean"] > 0 for g in local_groups
+                                                    for d in g["metrics"]["paired_strict_deltas"]),
+                   "negative_effect_candidates":sum(d["mean"] < 0 for g in local_groups
+                                                    for d in g["metrics"]["paired_strict_deltas"]),
+                   "collection_seconds":sum(g["elapsed_seconds"] for g in local_groups)},
                "paired_controls":sum(len(r["controls"]) for r in units),
-               "sampling_tokens":{key:sum(r["sampling_tokens"][key] for r in units)
-                                  for key in units[0]["sampling_tokens"]},
+               "sampling_tokens":{key:sum(r["sampling_tokens"].get(key,0) for r in units)
+                                  for key in set().union(*(r["sampling_tokens"] for r in units))},
                "updates_with_global_signal":sum(r["metrics"]["global_signal"] for r in units),
                "updates_with_local_signal":sum(r["metrics"]["local_signal"] for r in units),
                "compression_probes":{"attempted":len(compression),"eligible":sum(p["eligible"] for p in compression),
@@ -293,7 +422,17 @@ def main():
     p.add_argument("--outcome-only-updates",type=int,default=GLOBAL_UPDATES)
     p.add_argument("--validation-count",type=int,default=VAL_N)
     p.add_argument("--seed",type=int,default=SEED,help="Training seed. Task selection and evaluation seeds stay fixed.")
-    p.add_argument("--credit-mode",choices=("global","paired","evidence"),default="paired")
+    p.add_argument("--credit-mode",choices=("global","paired","evidence","local","alternating"),default="paired")
+    p.add_argument("--trajectory-objective",choices=("em_f1","strict"),default="em_f1")
+    p.add_argument("--local-candidates",type=int,default=GROUP)
+    p.add_argument("--local-repeats",type=int,default=1)
+    p.add_argument("--local-continuation",choices=("greedy","stochastic"),default="greedy",
+                   help="Downstream manager sampling; the reader remains frozen and greedy.")
+    p.add_argument("--local-objective",choices=("group_relative","paired_delta"),default="group_relative")
+    p.add_argument("--enhanced-memory",action="store_true")
+    p.add_argument("--teacher-config",type=Path,help="Private USTC config; enables bounded local repair supervision.")
+    p.add_argument("--teacher-max-requests",type=int,default=32)
+    p.add_argument("--teacher-learning-rate",type=float,default=1e-6)
     p.add_argument("--evidence-mask",choices=("delete","length_matched"),default="delete")
     p.add_argument("--bridge-candidates",action="store_true")
     p.add_argument("--shared-interface",action="store_true",
@@ -310,8 +449,23 @@ def main():
         p.error("--preflight-only cannot be combined with training continuation flags")
     if args.evidence_mask!="delete" and args.credit_mode!="evidence":
         p.error("length-matched masking requires --credit-mode evidence")
+    if args.trajectory_objective == "strict" and args.credit_mode == "evidence":
+        p.error("legacy evidence credit uses EM/F1; use paired, local, alternating, or global for strict EM")
+    if not 2 <= args.local_candidates <= 16 or not 1 <= args.local_repeats <= 8:
+        p.error("local candidates must be 2..16 and paired continuations 1..8")
+    if args.local_continuation == "greedy" and args.local_repeats != 1:
+        p.error("deterministic continuations must not be repeated as independent samples")
+    if args.credit_mode not in {"local","alternating"} and (args.local_candidates != GROUP
+            or args.local_repeats != 1 or args.local_continuation != "greedy"):
+        p.error("local sampling settings require local or alternating credit mode")
     if args.shared_interface and not args.bridge_candidates:
         p.error("--shared-interface requires --bridge-candidates")
+    if args.enhanced_memory and not args.shared_interface:
+        p.error("--enhanced-memory requires --shared-interface and --bridge-candidates")
+    if (args.local_objective != "group_relative" or args.teacher_config) and args.credit_mode not in {"local","alternating"}:
+        p.error("paired local credit and teacher repair require local or alternating mode")
+    if args.teacher_max_requests < 1 or not 0 < args.teacher_learning_rate <= 1e-3:
+        p.error("invalid teacher request budget or learning rate")
     if not (args.updates>0 and args.validation_count>0 and 0<=args.outcome_only_updates<=args.updates):
         p.error("updates and validation count must be positive; outcome-only updates must fit the schedule")
     if not 0<=args.seed<2**32:
@@ -323,7 +477,20 @@ def main():
     args.output.mkdir(parents=True,exist_ok=True)
     with (args.output/".run.lock").open("a") as lock:
         fcntl.flock(lock.fileno(),fcntl.LOCK_EX|fcntl.LOCK_NB)
-        execute(args,args.output)
+        teacher = None
+        try:
+            if args.teacher_config and not args.preflight_only:
+                from scope.teacher_api import APITeacher
+                teacher = APITeacher(args.teacher_config,args.output/"teacher_cache",args.teacher_max_requests,
+                                     allow_unusable=True)
+                usage = args.output/"teacher_api_usage.json"
+                if usage.exists():
+                    teacher.counts.update(json.loads(usage.read_text(encoding="utf-8")))
+            execute(args,args.output,teacher)
+        finally:
+            if teacher is not None:
+                atomic_json(args.output/"teacher_api_usage.json",dict(teacher.counts))
+                teacher.close()
 
 
 if __name__=="__main__":

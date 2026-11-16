@@ -15,6 +15,7 @@ from .recovery import prepare_recovery, record_recovery, information_progress
 from .contracts import Boundary, Budget, ContractError, Outcome, Scope, Sample
 from .io import canonical, digest
 from .interaction import ActionAdapter, execute_action, interaction_guidance, record_progress
+from .shop_purchase import review_purchase
 from .state_graph import apply_observation, compression_due, core_claims, management_reason, shopping_checklist
 from .tools import ToolExecutor, SCHEMA_HELP, context_view, graph_tool_prompt, parse_tool, public_snippet
 
@@ -205,6 +206,7 @@ class EpisodeRunner:
         view["experience"]=working.get("experiences",[])
         history=list(history[-2:] if view["summary"] else history)
         limit=self.cfg.get("actor_max_input",6144)
+        purchase = review_purchase(goal, working.get("public_state", {}).get("purchase_panel"))
         current=observation
         while True:
             messages=[{"role":"system","content":getattr(self.env,"actor_system",ACTOR_SYSTEM)},{"role":"user","content":goal}]
@@ -218,6 +220,12 @@ class EpisodeRunner:
             if working.get("warning"):content+="\n"+working["warning"]
             if view.get("constraint_checklist"):
                 content += "\nBefore Buy Now, review the public checklist. Resolve conflicts when possible; pending is unconfirmed."
+            if self.cfg.get("shop_purchase_flow"):
+                content += ("\n购物流程：用商品类别和关键属性搜索；打开候选后，核对商品属性和规格。"
+                            "选完规格要看页面是否确认，再决定是否购买。若当前商品有明确冲突，换规格或返回重搜。"
+                            "无法从公开页面确认的条件仍为待核对。")
+                if purchase:
+                    content += "\n购买前核对：" + canonical(purchase)
             if view.get("decision_evidence"):
                 content += ("\nBefore your next action, check the listed entity and state slots. A pending slot needs a public check. "
                             "Use the exact observed entity and change a rejected command when the public state has not changed.")
@@ -250,6 +258,9 @@ class EpisodeRunner:
             raise ContractError("Teacher demonstrations are separate from student credit rollouts")
         action_mode = cfg.get("action_mode", "legacy")
         loop_policy = cfg.get("loop_policy", "legacy")
+        environment_limit = cfg.get("max_environment_steps")
+        if environment_limit is not None and self.action_adapter is None:
+            raise ContractError("An environment step limit requires dispatch tracing")
         samples=[];events=[];boundaries=[]
         if boundary:
             if boundary.role_versions!=self.policy.versions:
@@ -383,20 +394,26 @@ class EpisodeRunner:
                 recovery_plan = copy.deepcopy(working.get("recovery_plan", {}))
                 observation, done, public, action = execute_action(
                     self.env, self.action_adapter, sample.text, before, state, action_mode,
-                    recovery_plan.get("blocked_commands", []))
+                    recovery_plan.get("blocked_commands", []), goal=goal)
+                environment_limit_reached = False
+                if environment_limit is not None:
+                    working["environment_steps"] = working.get("environment_steps", 0) + int(action["sent"] is True)
+                    environment_limit_reached = working["environment_steps"] == environment_limit
+                terminal = bool(done or budget.turns <= 0 or environment_limit_reached)
                 if public["is_error"] and action["action_status"] != "no_progress_blocked":invalid+=1
                 command=public.get("command")
                 entity=working["current_entity"]
                 receipt_id = None
                 if command and not public["is_error"]:
                     next_entity = self.public_projection.evidence_entity(command, entity)
+                    next_entity = self.public_projection.observation_entity(observation, next_entity)
                     if next_entity != entity:
                         working["candidate_since"] = atlas.revision + 1
                         working.pop("confirmation", None)
                     entity = next_entity
                     working["current_entity"]=entity
                 if command and (not public["is_error"] or working.get("state_graph") and action["sent"] is True):
-                    receipt=atlas.append_public(command,"action_receipt",entity,terminal=bool(done or budget.turns<=0))
+                    receipt=atlas.append_public(command,"action_receipt",entity,terminal=terminal)
                     receipt_id = receipt["id"]
                     if not working.get("state_graph"):
                         attempted={"entity":entity,"predicate":"attempted_action","value":command,"support_status":"supported",
@@ -405,8 +422,10 @@ class EpisodeRunner:
                         atlas.commit(checked,atlas.revision,digest([receipt["id"],"attempted"]))
                 record = None
                 if action["sent"] is not False or action_mode == "legacy":
+                    link = ({"action_receipt_id": receipt_id} if receipt_id and not public["is_error"]
+                            and getattr(self.public_projection, "observe_with_public_receipt", False) else {})
                     record = atlas.append_public(observation, "observation", entity, clickables=public["clickables"],
-                                                 terminal=bool(done or budget.turns<=0))
+                                                 terminal=terminal, **link)
                     working["observation_id"] = record["id"]
                 if not public["is_error"]:
                     working["public_state"] = self.public_projection.observe(observation, state, command, public["clickables"])
@@ -432,6 +451,8 @@ class EpisodeRunner:
                                                   for k in sorted(state.keys() | next_state.keys())
                                                   if state.get(k) != next_state.get(k)},
                               progress=progress, loop=cycle)
+                if self.cfg.get("shop_purchase_flow") and command == "click[Buy Now]":
+                    action["purchase_review"] = review_purchase(goal, state.get("purchase_panel"))
                 if working.get("decision_recovery"):
                     information_progress(working, action, before, observation)
                     record_recovery(working, action)
@@ -476,8 +497,8 @@ class EpisodeRunner:
                                **({"decision_slots":decision_rows} if decision_rows else {}),
                                "is_error":public["is_error"],"termination":sample.termination,"revision":atlas.revision,
                                **action})
-                if done:
-                    termination_reason = "environment_done"
+                if done or environment_limit_reached:
+                    termination_reason = "environment_done" if done else "environment_step_budget"
                     break
             metrics=dict(self.env.metrics)
             tokens=sum(costs.values())-prefix_cost

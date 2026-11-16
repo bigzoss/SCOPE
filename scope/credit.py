@@ -5,6 +5,9 @@ import numpy as np
 from .contracts import ContractError
 
 
+PAIRED_OBJECTIVES = {"group_relative", "paired_delta"}
+
+
 def standardize(values):
     array=np.asarray(values,dtype=np.float64)
     if not np.isfinite(array).all():raise FloatingPointError("Non-finite group return")
@@ -60,8 +63,10 @@ def interaction(q00,q01,q10,q11):
             "interaction":q11-q10-q01+q00}
 
 
-def paired_local_samples(boundary, candidates, baselines, cost_weight):
+def paired_local_samples(boundary, candidates, baselines, cost_weight, *, objective="group_relative"):
     """Strict task utility is paired by continuation seed. Compression is a bounded tie-breaker."""
+    if objective not in PAIRED_OBJECTIVES:
+        raise ContractError("Unknown paired local objective")
     if not baselines or any(len(c["outcomes"]) != len(baselines) for c in candidates):
         raise ContractError("Every local candidate requires the same continuation seeds as FINISH")
     if any(c["boundary_hash"] != boundary.fingerprint() for c in candidates):
@@ -93,11 +98,12 @@ def paired_local_samples(boundary, candidates, baselines, cost_weight):
             saving = 0.
         savings.append(max(-1., min(1., saving)))
     centered = standardize([returns[i] for i in valid])
-    task_zero_variance = not any(centered)
+    task_advantages = [returns[i] for i in valid] if objective == "paired_delta" else centered
+    task_zero_signal = not any(task_advantages)
     weighted, advantages = [], [0.] * len(candidates)
-    for index, advantage in zip(valid, centered):
+    for index, advantage in zip(valid, task_advantages):
         # Small successful compression differences must not be amplified by normalization.
-        if task_zero_variance and len(valid) >= 2:
+        if task_zero_signal and len(valid) >= 2:
             advantage = cost_weight * savings[index]
         sample = candidates[index]["sample"]
         sample.advantage, sample.credit_scope = advantage, "paired:" + boundary.phase
@@ -105,10 +111,12 @@ def paired_local_samples(boundary, candidates, baselines, cost_weight):
         if advantage:
             weighted.append((sample, 1 / len(valid)))
     return weighted, {"phase": boundary.phase, "opportunity": boundary.opportunity,
+        "objective": objective,
         "baseline_strict": baseline_success, "candidate_strict": strict_values, "strict_deltas": returns,
         "advantages": advantages, "valid_candidates": len(valid), "operations": [c["operation"] for c in candidates],
-        "task_zero_variance": task_zero_variance, "zero_variance": not any(advantages),
-        "non_task_only_advantage": task_zero_variance and any(advantages),
+        "task_zero_variance": not any(centered), "task_zero_signal": task_zero_signal,
+        "zero_variance": not any(advantages),
+        "non_task_only_advantage": task_zero_signal and any(advantages),
         "baseline_success_count":sum(baseline_success),
         "candidate_success_count":sum(sum(values) for values in strict_values),
         "positive_effect_candidates":sum(returns[i] > 0 for i in valid),

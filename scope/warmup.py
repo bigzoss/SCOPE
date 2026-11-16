@@ -446,7 +446,16 @@ def warmup(policy,examples,optimizers,output,receipt_hash,epochs=1,batch_size=1,
         ids=policy.encode(row["messages"])
         choices = []
         if role == "actor":
-            if row.get("source") != "teacher_actor_public_prefix" or row.get("environment_accepted") is not True or row.get("task_success") != 1:
+            if row.get("source") == "teacher_verified_hotpot_answer":
+                validation=row.get("evidence_use_validation",{})
+                if (validation.get("accepted") is not True or validation.get("parameters_unchanged") is not True
+                    or validation.get("reason")!="checked_actor_supervision" or validation.get("loss_owner")!="actor_sft_only"
+                    or validation.get("teacher_answer_verified_by_scorer") is not True
+                    or validation.get("task_id")!=row["task_id"]
+                    or validation.get("native_prompt_sha256")!=digest(row["messages"])
+                    or validation.get("proposal",{}).get("answer")!=row["completion"]):
+                    raise ContractError("HotpotQA actor SFT requires an audited teacher answer and matching public prompt")
+            elif row.get("source") != "teacher_actor_public_prefix" or row.get("environment_accepted") is not True or row.get("task_success") != 1:
                 raise ContractError("Actor SFT requires executed demonstrations from successful training episodes")
             tokens=policy.tokenizer.encode(row["completion"],add_special_tokens=False)
             if policy.tokenizer.eos_token_id is not None:tokens.append(policy.tokenizer.eos_token_id)

@@ -138,7 +138,9 @@ def train(policy,env,registry,config,output,receipt,experience=None,resume=None,
                     baselines, candidates, seeds = paired_rollouts(runner, boundary, cfg.get("local_group_size",4),
                         cfg.get("local_repeats",1), cfg.get("local_continuation","greedy")=="greedy",
                         [config.get("seed",233),step])
-                    local_weighted,local_info = paired_local_samples(boundary, candidates, baselines, cfg.get("local_cost_weight",.05))
+                    local_weighted,local_info = paired_local_samples(
+                        boundary, candidates, baselines, cfg.get("local_cost_weight", .05),
+                        objective=cfg.get("local_objective", "group_relative"))
                     local_info["continuation_seeds"] = seeds
                     local_info["boundary_hash"] = boundary.fingerprint()
                     local_info["global_manager_credit_applied"] = False
@@ -173,7 +175,7 @@ def train(policy,env,registry,config,output,receipt,experience=None,resume=None,
             if policy.fingerprint(other)!=frozen:raise ContractError("Frozen role parameters changed")
             info={"step":step,"role":role,"length":length,"global":global_info,"local":local_info,"probe_cost":probe_cost,
                   "local_credit": "paired" if paired else "legacy",
-                  "task_policy_gradient": ((bool(local_weighted) and cfg.get("local_weight", .25) > 0 and not local_info["task_zero_variance"])
+                  "task_policy_gradient": ((bool(local_weighted) and cfg.get("local_weight", .25) > 0 and not local_info["task_zero_signal"])
                                            if paired and role == "manager" else not global_info["task_zero_variance"]),
                   "kl_only_update": bool(metrics["optimizer_step"] and not any(s.advantage and w for s, w in weighted)),
                   "global_queries":sum(map(len,branches)),"parameter_hash_before":before,"parameter_hash_after":after,

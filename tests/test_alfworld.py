@@ -19,3 +19,22 @@ def test_public_command_and_manifest_adapter(tmp_path,monkeypatch):
     monkeypatch.setattr(env.http,"get",lambda *a,**k:Response())
     assert env.health()["manifest_unchanged"]
     with pytest.raises(ContractError,match="no native"):env.snapshot()
+
+
+def test_placement_alias_and_public_move_receipt():
+    from scope.alfworld import ALFWorldActions
+
+    adapter = ALFWorldActions()
+    state = {"entities":["mug 1","desk 1"],"held":["mug 1"],"location":"desk 1"}
+    assert adapter.normalize("put mug 1 in/on desk 1.") == "move mug 1 to desk 1"
+    assert adapter.normalize("put mug 1 on desk 1") == "move mug 1 to desk 1"
+    assert adapter.bind("move mug 1 to desk 1", state).status == "bound"
+    assert adapter.bind("move mug 1 to desk", state).status == "missing"
+    assert adapter.recovery_slots("move mug 1 to desk 1")[0] == ("alf:mug 1", "held")
+    assert adapter.confirmation_target("move mug 1 to desk 1", "task") == ("alf:mug 1", "held", False)
+    assert adapter.observe("Nothing happens.", state, "move mug 1 to desk 1", [])["held"] == ["mug 1"]
+    receipt = "You move the mug 1 to the desk 1."
+    after = adapter.observe(receipt, state, "move mug 1 to desk 1", [])
+    assert after["held"] == [] and after["object_locations"]["mug 1"] == "desk 1"
+    assert {(f.predicate, f.value) for f in adapter.public_facts({"text":receipt})} == {
+        ("held", False), ("object_location", "alf:desk 1")}

@@ -94,12 +94,17 @@ class Validator:
                 for match in public_prices(record["text"]):
                     if not ref["start"]<=match.start()<match.end()<=ref["end"]:continue
                     if float(match.group(1) or match.group(2))==float(value):matching_prices.append(match.group(0))
+            from .shop_purchase import read_panel
+            for fact, record, _ in domain_matches:
+                _, panel_span = read_panel(record["text"])
+                if panel_span and (fact.start, fact.end) == panel_span.span(1):
+                    matching_prices.append("元")
             supported=bool(matching_prices)
         elif predicate == "available_option":
             supported = str(value) in quote and any(str(value) in r.get("clickables", []) for r in records)
         elif predicate == "selected_color":
-            # Current upstream text does not usually expose this confirmation: keep pending.
-            supported = entity!="task" and any(r["kind"]=="observation" and any(
+            # Selection requires a public marker or a validated storefront panel.
+            supported = bool(domain_matches) or entity!="task" and any(r["kind"]=="observation" and any(
                 ref["start"]<=match.start('field')<match.end('field')<=ref["end"] and match.group('value').strip()==value
                 for match in _SELECTED.finditer(r["text"])) for r,ref in zip(records,refs))
         elif predicate == "attempted_action":

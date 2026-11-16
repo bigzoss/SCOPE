@@ -12,7 +12,7 @@
   "environment": {
     "kind": "alfworld_http",
     "base_url": "http://127.0.0.1:5088",
-    "manifest": "/home/hyx/lm_workspace/longagent/outputs/alfworld_teica20/teica-v7-alfworld-gpu5-train20-20261018-v1/alfworld_manifest.json"
+    "manifest": "/home/hyx/lm_workspace/SCOPE/runs/hotpot_transfer_20261109.nf63uA/alfworld/test_manifest.json"
   },
   "runtime": {
     "max_turns": 30,
@@ -76,6 +76,8 @@
     ]
   },
   "evaluation": {
+    "max_environment_steps": 50,
+    "max_actor_proposals": 100,
     "sequence_length": 2
   }
 }

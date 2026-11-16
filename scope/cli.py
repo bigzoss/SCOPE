@@ -265,7 +265,9 @@ def main(argv=None):
             if kind=="alfworld_http":
                 from .alfworld import ALFWorldEnvironment
                 env=ALFWorldEnvironment(config["environment"]["base_url"],allowed,config["environment"]["manifest"])
-            else:env=ShopEnvironment(config["environment"]["base_url"],allowed,receipt["environment_manifest_sha256"])
+            else:
+                env=ShopEnvironment(config["environment"]["base_url"],allowed,receipt["environment_manifest_sha256"],
+                                    purchase_flow=config["runtime"].get("shop_purchase_flow", False))
             env.health()
             try:
                 if args.command=="train":

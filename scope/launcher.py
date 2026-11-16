@@ -31,6 +31,8 @@ def own_service(config,output,enabled=False):
           "--longagent-root",service["longagent_root"],"--manifest",service["manifest"],
           "--train-products",service["train_products"],"--eval-products",service["eval_products"],
           "--port",str(parsed.port),"--owner-pid",str(os.getpid())]
+    if config["runtime"].get("shop_purchase_flow"):
+        args.append("--purchase-panel")
     env=dict(os.environ);env["CUDA_VISIBLE_DEVICES"]="";env["JAVA_HOME"]=service["java_home"]
     env["PATH"]=env["JAVA_HOME"]+"/bin:"+env.get("PATH","")
     env["PYTHONPATH"]=str(Path(__file__).resolve().parents[1])+os.pathsep+env.get("PYTHONPATH","")

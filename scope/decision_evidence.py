@@ -6,7 +6,7 @@ from .state_graph import shopping_checklist
 def targets(atlas, working, goal):
     entity = working.get("current_entity", "task")
     result = [tuple(slot) for slot in working.get("recovery_slots", ())]
-    if working.get("decision_recovery"):
+    if working.get("decision_recovery") or working.get("domain_decision_slots"):
         result += [tuple(slot) for slot in working.get("decision_targets", ())]
     confirmation = working.get("confirmation") or {}
     if confirmation.get("status") in {"pending", "conflict"}:

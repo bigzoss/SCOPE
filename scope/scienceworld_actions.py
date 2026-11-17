@@ -3,6 +3,7 @@ import re
 
 from .interaction import ActionAdapter, action_text
 from .state_graph import PublicFact
+from .scienceworld_execution import public_aliases
 
 
 FOCUS = re.compile(r"\bfocus on\s+([^.!?;]+)", re.I)
@@ -35,13 +36,16 @@ def focus_requirements(goal):
     return requirements
 
 
-def confirmed_focuses(history):
-    for turn in history:
+def confirmed_focuses(history, *, resolve_aliases=False):
+    for index, turn in enumerate(history):
         command = turn.get("command") or ""
         if not command.lower().startswith("focus on ") or turn.get("is_error"):
             continue
         match = re.search(r"\byou focus on\s+([^.!?;]+)", turn.get("observation", ""), re.I)
-        if match and focus_target(match[1]) == focus_target(command[9:]):
+        selected = focus_target(command[9:])
+        if resolve_aliases:
+            selected = public_aliases(history[:index]).get(selected, {}).get('target', selected)
+        if match and focus_target(match[1]) == selected:
             yield focus_target(match[1])
 
 
@@ -192,9 +196,9 @@ def thermal_preparation_priority(command, trial, history):
     return 0
 
 
-def public_focus_stage(goal, history, state, *, thermal=False):
+def public_focus_stage(goal, history, state, *, thermal=False, resolve_aliases=False):
     stages = focus_requirements(goal)
-    completed = list(confirmed_focuses(history))
+    completed = list(confirmed_focuses(history, resolve_aliases=resolve_aliases))
     for target in completed:
         if stages and stages[0] and (stages[0] == target or thermal and
                                     thermal_subject(stages[0]) == thermal_subject(target)):
@@ -276,17 +280,19 @@ class ThermalScienceWorldActions(ScienceWorldActions):
                     yield PublicFact(entity, "material_state", phase[1], fact.start, fact.end)
 
 
-def science_command_guard(command, goal, state, history, observation, *, thermal=False):
+def science_command_guard(command, goal, state, history, observation, *, thermal=False, resolve_aliases=False):
     if command in _META_COMMANDS or command.startswith(("reset ", "teleport ")):
         return "meta_command"
     if command.isdigit() and not re.search(r"(?im)(?:ambiguous|which (?:one|object)|multiple options)", observation):
         return "no_public_disambiguation_request"
     if not command.startswith("focus on "):
         return None
-    target, reason = public_focus_stage(goal, history, state, thermal=thermal)
+    target, reason = public_focus_stage(goal, history, state, thermal=thermal, resolve_aliases=resolve_aliases)
     if target is None:
         return reason
     selected = focus_target(command[len("focus on "):])
+    if resolve_aliases:
+        selected = public_aliases(history).get(selected, {}).get('target', selected)
     if selected != target and not (thermal and thermal_subject(selected) == thermal_subject(target)):
         return "different_public_focus_target"
     return None

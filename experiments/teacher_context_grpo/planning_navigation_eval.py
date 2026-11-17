@@ -10,6 +10,7 @@ from scope.babyai_navigation import (PublicLocalMap, ahead, delivery_tiles, matc
                                      matching_targets, mission_stages, ordered_mission)
 from scope.io import atomic_json, read_jsonl
 from scope.pddl_subgoals import avoid_repeated_inverse, rank_public_actions, relevant_state_facts
+from scope.pddl_public_model import PublicSTRIPSModel, guard_repeated_transitions, canonical_fact, readable_fact
 
 
 class MeteredPDDL(base.AdaptedPDDL):
@@ -104,6 +105,150 @@ class CompactReorderedPDDL(PlannedPDDL):
 class ExactLoopPDDL(CompactReorderedPDDL):
     inverse = True
     strict_inverse = True
+
+
+class DependencyStatePDDL(MeteredPDDL):
+    """Preserve public action resources; old experimental arms remain unchanged."""
+    dependency_ranking = False
+    suppress_loops = False
+    guard_repeated = False
+    whole_goal = False
+    resource_batch = False
+
+    def reset(self, task_id):
+        self.public_model = None
+        super().reset(task_id)
+        space = self.env.action_space
+        space.all_ground_literals(self.state)
+        operators = {name.lower(): op for name, op in self.env.domain.operators.items()}
+        self.public_model = PublicSTRIPSModel(operators, space._all_ground_literals)
+        return self.render_state()
+
+    def render_state(self):
+        # reset() renders before the grounding is available; preserve all facts then.
+        facts = (self.public_model.state_view(set(self.state.literals), self.goal_literals)
+                 if self.public_model else self.state.literals)
+        checklist = self.goal_checklist()
+        return ("Pending goal conditions: " + "; ".join(checklist["pending"])
+                + "\nSatisfied conditions: " + "; ".join(checklist["satisfied"])
+                + "\nCurrent public action resources: " + "; ".join(sorted(self.render(f) for f in facts)))
+
+    def public_action_candidates(self, atlas, working, goal, observation, history):
+        if not self.dependency_ranking:
+            return super().public_action_candidates(atlas, working, goal, observation, history)
+        available = {self.action_adapter.normalize(self.render(a)): a
+                     for a in self.env.action_space.all_ground_literals(self.state)}
+        ranked = self.public_model.rank(available, frozenset(self.state.literals), self.goal_literals,
+                                       self.recent_states, self.recent_edges, self.suppress_loops,
+                                       whole_goal=self.whole_goal, resource_batch=self.resource_batch)
+        self.action_signals = {r['command']: r for r in ranked}
+        if self.guard_repeated:
+            # Never remove the only escape. Changed cargo/resource states do not
+            # count as the same transition, so legitimate return trips remain.
+            ranked = guard_repeated_transitions(ranked)
+        return [{"command": row['command'], "reason": "public_grounded_dependencies",
+                 "evidence_ids": [working['observation_id']]} for row in ranked[:8]]
+
+    def brief(self, menu):
+        if not self.dependency_ranking:
+            return ""
+        return "\nPublic planning estimates (heuristics, not rewards): " + " | ".join(
+            f"{entry['label']}: next-goal distance {self.action_signals[entry['command']]['distance_after']}; "
+            f"repeated state transition {self.action_signals[entry['command']]['repeated_inverse']}"
+            for entry in menu)
+
+
+class DependencyRankedPDDL(DependencyStatePDDL):
+    dependency_ranking = True
+
+
+class DependencyLoopPDDL(DependencyRankedPDDL):
+    suppress_loops = True
+
+
+class DependencyGuardedPDDL(DependencyLoopPDDL):
+    guard_repeated = True
+
+
+class CanonicalStatePDDL(DependencyGuardedPDDL):
+    """Keep exact native commands, but preserve argument order/arity in facts."""
+    def reset(self, task_id):
+        observation = super().reset(task_id)
+        self.task_goal = 'Satisfy all public goal facts: ' + '; '.join(
+            sorted(canonical_fact(f) for f in self.goal_literals))
+        return observation
+
+    def goal_checklist(self):
+        state = set(self.state.literals)
+        return {'satisfied': sorted(canonical_fact(f) for f in self.goal_literals & state),
+                'pending': sorted(canonical_fact(f) for f in self.goal_literals - state)}
+
+    def render_state(self):
+        facts = (self.public_model.state_view(set(self.state.literals), self.goal_literals)
+                 if self.public_model else self.state.literals)
+        checklist = self.goal_checklist()
+        return ('Public goals: ' + base.json.dumps(checklist)
+                + '\nPublic facts (predicate arguments retain domain order): '
+                + '; '.join(sorted(canonical_fact(f) for f in facts)))
+
+
+class WholeGoalPDDL(CanonicalStatePDDL):
+    whole_goal = True
+
+    def brief(self, menu):
+        return '\nPublic relaxed all-goal estimates (not a plan or reward): ' + ' | '.join(
+            f"{e['label']}: sum-cost {self.action_signals[e['command']]['aggregate_distance_after']}; "
+            f"same-trip free-hand load {self.action_signals[e['command']]['batch_load_opportunity']}; "
+            f"public transport phase {self.action_signals[e['command']]['transport_role']}; "
+            f"achieves {sorted(canonical_fact(f) for f in self.action_signals[e['command']]['advances'])}; "
+            f"undoes {sorted(canonical_fact(f) for f in self.action_signals[e['command']]['risks'])}"
+            for e in menu)
+
+
+class ResourceGoalPDDL(WholeGoalPDDL):
+    resource_batch = True
+
+
+class ReadableStatePDDL(DependencyGuardedPDDL):
+    def reset(self, task_id):
+        observation = super().reset(task_id)
+        self.task_goal = 'The goal is to satisfy the following conditions: ' + ', '.join(
+            sorted(readable_fact(f, self.formats) for f in self.goal_literals))
+        return observation
+
+    def goal_checklist(self):
+        state = set(self.state.literals)
+        return {'satisfied': sorted(readable_fact(f, self.formats) for f in self.goal_literals & state),
+                'pending': sorted(readable_fact(f, self.formats) for f in self.goal_literals - state)}
+
+    def render_state(self):
+        facts = (self.public_model.state_view(set(self.state.literals), self.goal_literals)
+                 if self.public_model else self.state.literals)
+        checklist = self.goal_checklist()
+        return ('Pending goal conditions: ' + '; '.join(checklist['pending'])
+                + '\nSatisfied conditions: ' + '; '.join(checklist['satisfied'])
+                + '\nCurrent public action resources: '
+                + '; '.join(sorted(readable_fact(f, self.formats) for f in facts)))
+
+
+class WholeGoalOnlyPDDL(DependencyGuardedPDDL):
+    whole_goal = True
+
+    def brief(self, menu):
+        return '\nPublic all-goal relaxed cost estimates: ' + ' | '.join(
+            f"{e['label']}: {self.action_signals[e['command']]['aggregate_distance_after']}; "
+            f"undoes {sorted(canonical_fact(f) for f in self.action_signals[e['command']]['risks'])}"
+            for e in menu)
+
+
+class TransportOnlyPDDL(DependencyGuardedPDDL):
+    resource_batch = True
+
+    def brief(self, menu):
+        note = super().brief(menu)
+        roles = [f"{e['label']}: {self.action_signals[e['command']]['transport_role']}"
+                 for e in menu if self.action_signals[e['command']]['transport_role']]
+        return note + ('\nPublic transport action effects: ' + ' | '.join(roles) if roles else '')
 
 
 class MeteredBabyAI(base.AdaptedBabyAI):
@@ -342,8 +487,14 @@ class Runner(base.AdaptationRunner):
             note = self.env.brief(self.action_menu)
             previous = messages[-1]["content"]
             messages[-1]["content"] += note
+            self.turn_audits[-1]['planning_card_in_view'] = True
             if len(self.policy.encode(messages)) > self.cfg.get("actor_max_input", 6144):
                 messages[-1]["content"] = previous
+                self.turn_audits[-1]['planning_card_in_view'] = False
+            if isinstance(self.env, DependencyRankedPDDL):
+                self.turn_audits[-1]['planning_signals'] = {
+                    c: {k: (sorted(map(str, v)) if isinstance(v, (set, frozenset)) else v)
+                        for k, v in row.items()} for c, row in self.env.action_signals.items()}
         return messages, base.digest(messages), view_id
 
 
@@ -352,7 +503,12 @@ def create_env(root, domain, arm, specs, config):
         cls = {"adapted_interface": MeteredPDDL, "goal_dependencies": PlannedPDDL,
                "goal_dependencies_inverse": LoopAwarePDDL, "compact_state_only": CompactStatePDDL,
                "reordered_only": ReorderedPDDL, "compact_reordered": CompactReorderedPDDL,
-               "compact_reordered_exact_loop": ExactLoopPDDL}[arm]
+               "compact_reordered_exact_loop": ExactLoopPDDL, "dependency_state": DependencyStatePDDL,
+               "grounded_dependencies": DependencyRankedPDDL, "grounded_dependencies_loop": DependencyLoopPDDL,
+               "grounded_dependencies_guard": DependencyGuardedPDDL,
+               "canonical_state_guard": CanonicalStatePDDL, "whole_goal_guard": WholeGoalPDDL,
+               "resource_goal_guard": ResourceGoalPDDL, "readable_state_only": ReadableStatePDDL,
+               "whole_goal_only": WholeGoalOnlyPDDL, "transport_only": TransportOnlyPDDL}[arm]
         return cls(root, specs), None
     cls = {"adapted_interface": MeteredBabyAI, "local_map": MappedBabyAI, "local_map_stages": StagedBabyAI,
            "public_mission_stages": GoalDirectedBabyAI}[arm]

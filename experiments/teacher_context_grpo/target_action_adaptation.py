@@ -21,6 +21,8 @@ from scope.contracts import ContractError
 from scope.evaluation import evaluate
 from scope.io import atomic_json, digest, file_sha
 from scope.policy import HFPolicy
+from scope.scienceworld_stages import select_experiment_menu, select_continuous_experiment_menu, select_progress_experiment_menu
+from scope.scienceworld_execution import public_aliases, wait_rejection, step_diagnostic
 from scope.scienceworld_actions import (ScienceWorldActions, ThermalScienceWorldActions, focus_guard,
                                         public_focus_stage, science_command_guard, thermal_preparation_priority,
                                         thermal_trial)
@@ -116,6 +118,7 @@ class GroundedScienceWorld(GuardedScienceWorld):
 
     action_adapter = ScienceWorldActions()
     thermal = False
+    resolve_aliases = False
 
     def reset(self, task_id):
         self.public_state, self.last_public_observation, self.menu_audit = {}, '', {}
@@ -123,7 +126,8 @@ class GroundedScienceWorld(GuardedScienceWorld):
 
     def public_command_guard(self, command):
         return science_command_guard(command, self.current_goal, self.public_state,
-                                     self.public_history, self.last_public_observation, thermal=self.thermal)
+                                     self.public_history, self.last_public_observation, thermal=self.thermal,
+                                     resolve_aliases=self.resolve_aliases)
 
     def public_action_candidates(self, atlas, working, goal, observation, history):
         self.current_goal, self.public_history = goal, list(history)
@@ -149,7 +153,8 @@ class GroundedScienceWorld(GuardedScienceWorld):
             self.exact_commands[cmd] = next(iter(variants))
             if is_focus:
                 allowed_focus.append(cmd)
-        focus, status = public_focus_stage(goal, history, self.public_state, thermal=self.thermal)
+        focus, status = public_focus_stage(goal, history, self.public_state, thermal=self.thermal,
+                                          resolve_aliases=self.resolve_aliases)
         trial = thermal_trial(goal, history) if self.thermal else None
         if trial:
             evidence = defaultdict(deque)
@@ -215,6 +220,74 @@ class GroundedScienceWorld(GuardedScienceWorld):
 class ThermalScienceWorld(GroundedScienceWorld):
     action_adapter = ThermalScienceWorldActions()
     thermal = True
+
+
+class StagedScienceWorld(ThermalScienceWorld):
+    stage_selector = staticmethod(select_experiment_menu)
+    actor_system = (AdaptedScienceWorld.actor_system +
+                    ' Follow the public experiment stage. Explicitly requested instrument focus is an intermediate '
+                    'step. A conditional answer focus requires its measurement evidence. '
+                    'An accepted action does not by itself confirm a physical state change.')
+
+    def public_action_candidates(self, atlas, working, goal, observation, history):
+        super().public_action_candidates(atlas, working, goal, observation, history)
+        audit = self.menu_audit
+        selected, stage = self.stage_selector(
+            self.exact_commands, goal, history, audit.get('thermal_evidence'),
+            audit['focus_target'], audit['eligible_focus'])
+        by_event = defaultdict(deque)
+        for record in atlas.all_evidence():
+            if record['kind'] == 'observation':
+                by_event[record.get('action_command'), record['text']].append(record['id'])
+        sources = set()
+        wanted_turns = set(stage['experiment_stage'].get('public_turns', []))
+        if self.resolve_aliases:
+            bindings = public_aliases(history)
+            wanted_turns.update(row['turn'] for row in bindings.values())
+            stage['experiment_stage']['public_aliases'] = bindings
+        for index, event in enumerate(history):
+            queue = by_event[event.get('command'), event.get('observation', '')]
+            if queue:
+                eid = queue.popleft()
+                if index in wanted_turns:
+                    sources.add(eid)
+        stage['experiment_stage']['evidence_ids'] = sorted(sources)
+        audit.update(stage, offered_commands=selected,
+                     offered_focus=[c for c in selected if c in audit['eligible_focus']])
+        return [{'command': c, 'reason': 'public_stage_prerequisites',
+                 'evidence_ids': sorted(sources | {working['observation_id']})} for c in selected]
+
+
+class BudgetedScienceWorld(StagedScienceWorld):
+    resolve_aliases = True
+
+    def reset(self, task_id):
+        self.native_step_audits = []
+        return super().reset(task_id)
+
+    def public_command_guard(self, command):
+        reason = super().public_command_guard(command)
+        if reason:
+            return reason
+        if command == 'wait' and 'wait1' in self.env.get_valid_action_object_combinations():
+            return 'prefer_single_iteration_wait'
+        return wait_rejection(command, self.env.get_num_moves(), self.env.envStepLimit)
+
+    def step_command(self, command):
+        before = self.env.get_num_moves()
+        observation, done, public = super().step_command(command)
+        self.native_step_audits.append(step_diagnostic(
+            command, before, self.env.get_num_moves(), done,
+            self.env.server.getCompleted(), self.env.envStepLimit))
+        return observation, done, public
+
+
+class ProgressScienceWorld(BudgetedScienceWorld):
+    stage_selector = staticmethod(select_progress_experiment_menu)
+
+
+class ContinuousScienceWorld(BudgetedScienceWorld):
+    stage_selector = staticmethod(select_continuous_experiment_menu)
 
 
 class DevPDDL(native.PDDL):
@@ -293,6 +366,19 @@ class AdaptationRunner(AuditedRunner):
         self.turn_audits[-1]['native_progress_before'] = float(self.env.metrics['r_loose'])
         if isinstance(self.env, GroundedScienceWorld):
             self.turn_audits[-1]['menu_pipeline'] = self.env.menu_audit
+            stage = self.env.menu_audit.get('experiment_stage')
+            if stage:
+                previous = messages[-1]['content']
+                messages[-1]['content'] += '\nPublic experiment stage: ' + json.dumps(stage, ensure_ascii=False)
+                if len(self.policy.encode(messages)) > self.cfg.get('actor_max_input', 6144):
+                    messages[-1]['content'] = previous
+                    self.turn_audits[-1]['stage_card_in_view'] = False
+                else:
+                    view_hash = digest(messages)
+                    self.turn_audits[-1]['stage_card_in_view'] = True
+                    view = atlas.view(view_id)
+                    view_id = atlas.save_view(sorted(set(view['selected_ids']) | set(stage['evidence_ids'])),
+                                              view['summary'])['id']
             return self._measurements(atlas, messages, view_hash, view_id)
         return messages, view_hash, view_id
 
@@ -315,6 +401,14 @@ class AdaptationRunner(AuditedRunner):
     def run(self, *args, **kwargs):
         outcome = super().run(*args, **kwargs)
         steps = [event for event in outcome.events if event['phase'] == 'execute']
+        if isinstance(self.env, BudgetedScienceWorld):
+            dispatched = [event for event in steps if event.get('sent') is True]
+            if len(dispatched) != len(self.env.native_step_audits):
+                raise ContractError('Native-step audit does not align with dispatched commands')
+            for event, diagnostic in zip(dispatched, self.env.native_step_audits, strict=True):
+                event['native_step_diagnostic'] = diagnostic
+            if dispatched and dispatched[-1]['native_step_diagnostic']['wrapper_done']:
+                outcome.termination_reason = dispatched[-1]['native_step_diagnostic']['termination_reason']
         for index, step in enumerate(steps):
             following = steps[index + 1]['public_action_audit']['native_progress_before'] if index + 1 < len(steps) else outcome.metrics['r_loose']
             step['native_score_improved'] = following > step['public_action_audit']['native_progress_before']
@@ -333,6 +427,14 @@ def create_env(root, domain, arm, specs, config):
         env = ALFWorldEnvironment(endpoint, [r['id'] for r in specs], path)
         return env, shared.alf_service
     if domain == 'scienceworld':
+        if arm == 'progress_experiment':
+            return ProgressScienceWorld(specs), None
+        if arm == 'continuous_experiment':
+            return ContinuousScienceWorld(specs), None
+        if arm == 'public_budget_aliases':
+            return BudgetedScienceWorld(specs), None
+        if arm == 'public_stage_prerequisites':
+            return StagedScienceWorld(specs), None
         if arm == THERMAL_SCIENCE_ARM:
             return ThermalScienceWorld(specs), None
         if arm == GROUNDED_SCIENCE_ARM:
@@ -420,7 +522,7 @@ def run(root, domains):
                 turns_using_public_action_menu=sum(bool(e.get('public_action_audit', {}).get('selected_label')) for e in steps),
                 public_state_loops=sum(bool(e.get('loop')) for e in steps),
                 no_progress=sum(e.get('progress') in {'legal_no_progress', 'invalid_no_progress'} for e in steps))
-            if arm in {GROUNDED_SCIENCE_ARM, THERMAL_SCIENCE_ARM}:
+            if arm in {GROUNDED_SCIENCE_ARM, THERMAL_SCIENCE_ARM, 'public_stage_prerequisites', 'public_budget_aliases', 'continuous_experiment', 'progress_experiment'}:
                 pipeline = [e['public_action_audit']['menu_pipeline'] for e in steps]
                 diagnostic['action_menu_pipeline'] = {
                     'native_focus_turns': sum(item['native_focus_count'] > 0 for item in pipeline),
@@ -429,6 +531,18 @@ def run(root, domains):
                     'sent_focus_turns': sum(bool(e['sent']) and (e.get('normalized_command') or '').startswith('focus on ')
                                             for e in steps),
                     'removed_by_reason': dict(sum((Counter(item['removed_by_reason']) for item in pipeline), Counter()))}
+                if arm in {'public_stage_prerequisites', 'public_budget_aliases', 'continuous_experiment', 'progress_experiment'}:
+                    diagnostic['action_menu_pipeline'].update(
+                        movement_available_turns=sum(item['eligible_movement'] > 0 for item in pipeline),
+                        movement_offered_turns=sum(bool(item['offered_movement']) for item in pipeline),
+                        preparation_offered_turns=sum(bool(item['offered_preparation']) for item in pipeline),
+                        experiment_stages=dict(Counter(item['experiment_stage']['phase'] for item in pipeline)))
+                if arm in {'public_budget_aliases', 'continuous_experiment', 'progress_experiment'}:
+                    diagnostic['native_steps'] = {
+                        'total_native_moves': sum(e.get('native_step_diagnostic', {}).get('native_move_delta', 0) for e in steps),
+                        'native_budget_truncations': sum(r['termination_reason'] == 'native_environment_step_budget' for r in records),
+                        'wait_commands': dict(Counter(e['command'] for e in steps if e.get('sent')
+                                                     and e.get('command') in {'wait', 'wait1'}))}
             failed_early = [r for r in records if r['termination_reason'] == 'environment_done'
                             and not r['metrics']['success']]
             diagnostic['actions']['terminal_failures'] = len(failed_early)
